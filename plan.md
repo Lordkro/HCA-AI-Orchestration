@@ -125,11 +125,15 @@
   - Define message schema (sender, recipient, type, payload, timestamp)
   - Implement message routing logic
 
-- [ ] **1.4 — Database layer (SQLite)**
-  - Define schema: projects, tasks, messages, artifacts
-  - Create `Database` class with async support
-  - Implement CRUD operations for all entities
-  - Add migration support
+- [x] **1.4 — Database layer (SQLite)** ✅
+  - Define schema: projects, tasks, messages, artifacts, project_events
+  - Create `Database` class with async support (WAL mode, foreign keys, busy timeout)
+  - Implement full CRUD for all entities with pagination, filtering, search
+  - Add migration support (versioned schema with `schema_version` table)
+  - Project events timeline for UI history tracking
+  - Database diagnostics (`get_stats()`) for monitoring
+  - Duplicate-safe message saving (`INSERT OR IGNORE`)
+  - `get_latest_artifact()` for version-aware file retrieval
 
 - [ ] **1.5 — Base Agent framework**
   - Create abstract `BaseAgent` class
