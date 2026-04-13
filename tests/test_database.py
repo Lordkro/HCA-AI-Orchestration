@@ -368,9 +368,10 @@ class TestMessages:
         assert len(messages) == 1
 
     async def test_get_messages_with_sender_filter(self, db: Database) -> None:
-        for sender in ["pm", "coder", "pm"]:
+        senders = [("pm", "msg-pm-1"), ("coder", "msg-coder-1"), ("pm", "msg-pm-2")]
+        for sender, msg_id in senders:
             await db.save_message({
-                "id": f"msg-{sender}-{id(sender)}",
+                "id": msg_id,
                 "timestamp": "2024-01-01T00:00:00Z",
                 "sender": sender,
                 "recipient": "critic",
