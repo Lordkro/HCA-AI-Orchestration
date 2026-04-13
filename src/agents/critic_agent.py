@@ -95,7 +95,7 @@ Then provide:
 
 Be constructive but thorough. Do not approve work that has critical or major issues."""
 
-        response = await self.think(prompt, temperature=0.3)
+        response = await self.think(prompt, project_id=message.project_id, temperature=0.3)
 
         # Determine if approved or needs revision
         is_approved = "**APPROVED**" in response.upper() or "APPROVED" in response.split("\n")[0].upper()
@@ -127,7 +127,7 @@ Be constructive but thorough. Do not approve work that has critical or major iss
 
 Clarify your feedback with specific examples and suggestions."""
 
-        response = await self.think(prompt, temperature=0.4)
+        response = await self.think(prompt, project_id=message.project_id, temperature=0.4)
 
         return self.create_message(
             recipient=message.sender,

@@ -11,20 +11,12 @@ router = APIRouter()
 async def list_agents(request: Request) -> list[dict]:
     """Get the status of all agents."""
     agents = request.app.state.agents
-    return [
-        {
-            "role": agent.role.value,
-            "status": agent.status.value,
-            "model": agent._model,
-        }
-        for agent in agents
-    ]
+    return [agent.get_info() for agent in agents]
 
 
 @router.get("/stats")
 async def get_ollama_stats(request: Request) -> dict:
     """Get Ollama client statistics (token usage, performance)."""
-    # All agents share the same OllamaClient instance
     agents = request.app.state.agents
     if agents:
         return agents[0].ollama.get_stats()
@@ -37,10 +29,5 @@ async def get_agent(role: str, request: Request) -> dict:
     agents = request.app.state.agents
     for agent in agents:
         if agent.role.value == role:
-            return {
-                "role": agent.role.value,
-                "status": agent.status.value,
-                "model": agent._model,
-                "history_length": len(agent._conversation_history),
-            }
+            return agent.get_info()
     return {"error": f"Agent '{role}' not found"}

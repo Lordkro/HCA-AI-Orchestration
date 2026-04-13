@@ -1,10 +1,23 @@
-"""Base agent class — shared behavior for all HCA agents."""
+"""Base agent class — shared behavior for all HCA agents.
+
+Provides:
+- Reliable message consumption with consumer groups
+- Per-project conversation memory isolation
+- LLM interaction with automatic context management
+- Heartbeat / status broadcasting for the dashboard
+- Graceful shutdown with in-flight message draining
+- Hot-reloadable system prompts
+- Agent statistics for monitoring
+"""
 
 from __future__ import annotations
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -25,16 +38,72 @@ from src.core.ollama_client import OllamaClient
 logger = structlog.get_logger()
 
 
+# ============================================================
+# Agent Statistics
+# ============================================================
+
+
+@dataclass
+class AgentStats:
+    """Cumulative statistics for a single agent."""
+
+    messages_received: int = 0
+    messages_sent: int = 0
+    messages_failed: int = 0
+    messages_dead_lettered: int = 0
+    llm_calls: int = 0
+    llm_errors: int = 0
+    total_think_seconds: float = 0.0
+    projects_touched: set[str] = field(default_factory=set)
+    started_at: float = 0.0
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a JSON-safe snapshot of current stats."""
+        uptime = time.monotonic() - self.started_at if self.started_at else 0
+        return {
+            "messages_received": self.messages_received,
+            "messages_sent": self.messages_sent,
+            "messages_failed": self.messages_failed,
+            "messages_dead_lettered": self.messages_dead_lettered,
+            "llm_calls": self.llm_calls,
+            "llm_errors": self.llm_errors,
+            "total_think_seconds": round(self.total_think_seconds, 2),
+            "avg_think_seconds": (
+                round(self.total_think_seconds / self.llm_calls, 2)
+                if self.llm_calls
+                else 0
+            ),
+            "projects_touched": len(self.projects_touched),
+            "uptime_seconds": round(uptime, 1),
+        }
+
+
+# ============================================================
+# Base Agent
+# ============================================================
+
+
 class BaseAgent(ABC):
     """Abstract base class for all HCA agents.
 
     Provides:
-    - Message listening loop (inbox consumption)
-    - LLM interaction via Ollama
-    - Conversation memory management
-    - Message sending helpers
-    - Lifecycle management (start/stop)
+    - Reliable message loop with consumer groups (claim stale → consume new)
+    - Per-project conversation memory (agents don't mix project contexts)
+    - LLM interaction with automatic context-window trimming
+    - Heartbeat events for the dashboard
+    - Graceful shutdown (drain in-flight, then stop)
+    - Hot-reloadable system prompts
+    - Agent stats for the monitoring API
     """
+
+    # How long to wait between heartbeat emissions (seconds)
+    HEARTBEAT_INTERVAL: float = 30.0
+    # How many conversation turns to keep per project before auto-pruning
+    MAX_HISTORY_PER_PROJECT: int = 40
+    # Retry processing once before dead-lettering
+    MAX_PROCESSING_RETRIES: int = 1
+    # Stale message reclaim threshold (ms)
+    STALE_CLAIM_MS: int = 120_000
 
     def __init__(
         self,
@@ -49,41 +118,75 @@ class BaseAgent(ABC):
         self.ollama = ollama
         self.db = db
         self.status = AgentStatus.STOPPED
+        self.stats = AgentStats()
+
         self._running = False
-        self._conversation_history: list[ConversationEntry] = []
+        self._processing = False  # True while handling a message (for drain)
+
+        # Per-project conversation histories
+        self._project_histories: dict[str, list[ConversationEntry]] = {}
+
         self._system_prompt: str = ""
         self._model: str = settings.get_agent_model(role.value)
+        self._last_heartbeat: float = 0.0
 
         # Load system prompt from file
         self._load_system_prompt()
 
+    # --------------------------------------------------------
+    # System Prompt Management
+    # --------------------------------------------------------
+
+    @property
+    def _prompt_path(self) -> Path:
+        return Path(__file__).parent.parent / "prompts" / f"{self.role.value}.txt"
+
     def _load_system_prompt(self) -> None:
         """Load the system prompt from the prompts directory."""
-        prompt_file = Path(__file__).parent.parent / "prompts" / f"{self.role.value}.txt"
+        prompt_file = self._prompt_path
         if prompt_file.exists():
             self._system_prompt = prompt_file.read_text(encoding="utf-8").strip()
             logger.info("prompt_loaded", agent=self.role.value, file=str(prompt_file))
         else:
-            self._system_prompt = f"You are the {self.role.value} agent in an AI development team."
-            logger.warning("prompt_default", agent=self.role.value, file=str(prompt_file))
+            self._system_prompt = (
+                f"You are the {self.role.value} agent in an AI development team."
+            )
+            logger.warning("prompt_default", agent=self.role.value)
+
+    def reload_prompt(self) -> None:
+        """Hot-reload the system prompt from disk (e.g. via API call)."""
+        self._load_system_prompt()
+
+    # --------------------------------------------------------
+    # Lifecycle
+    # --------------------------------------------------------
 
     async def start(self) -> None:
         """Start the agent's message processing loop.
 
-        Uses Redis consumer groups for reliable message delivery:
-        1. First, claim any stale messages from previous crashes
-        2. Then consume new messages from the inbox
-        3. Acknowledge each message after successful processing
-        4. Dead-letter messages that repeatedly fail
+        Loop strategy (per iteration):
+        1. Emit heartbeat if interval has elapsed
+        2. Reclaim any stale/orphaned messages from previous crashes
+        3. Consume new messages from the inbox
+        4. Acknowledge each message after successful processing
+        5. Retry once on failure, then dead-letter
         """
         self._running = True
         self.status = AgentStatus.IDLE
+        self.stats.started_at = time.monotonic()
         logger.info("agent_started", agent=self.role.value, model=self._model)
+
+        await self._emit_heartbeat(force=True)
 
         while self._running:
             try:
-                # 1. Reclaim any stale/orphaned messages first
-                stale = await self.bus.claim_stale_messages(self.role, min_idle_ms=120_000)
+                # Heartbeat
+                await self._emit_heartbeat()
+
+                # 1. Reclaim stale messages
+                stale = await self.bus.claim_stale_messages(
+                    self.role, min_idle_ms=self.STALE_CLAIM_MS
+                )
                 for stream_name, entry_id, msg in stale:
                     if msg.sender != self.role:
                         await self._handle_message_reliable(stream_name, entry_id, msg)
@@ -93,7 +196,6 @@ class BaseAgent(ABC):
                     self.role, last_id=">", block_ms=2000
                 )
                 for stream_name, entry_id, msg in results:
-                    # Skip messages sent by self
                     if msg.sender == self.role:
                         await self.bus.acknowledge(stream_name, entry_id)
                         continue
@@ -104,57 +206,110 @@ class BaseAgent(ABC):
             except Exception as e:
                 logger.error("agent_loop_error", agent=self.role.value, error=str(e))
                 self.status = AgentStatus.ERROR
-                await asyncio.sleep(5)  # Back off on error
+                await asyncio.sleep(5)
 
         self.status = AgentStatus.STOPPED
-        logger.info("agent_stopped", agent=self.role.value)
+        logger.info("agent_stopped", agent=self.role.value, stats=self.stats.snapshot())
 
     async def stop(self) -> None:
-        """Signal the agent to stop processing."""
+        """Signal the agent to stop. Waits for any in-flight message to finish."""
+        logger.info("agent_stopping", agent=self.role.value)
         self._running = False
+
+        # Drain: wait up to 60s for in-flight message to complete
+        for _ in range(120):
+            if not self._processing:
+                break
+            await asyncio.sleep(0.5)
+
+        await self._emit_heartbeat(force=True, stopping=True)
+
+    # --------------------------------------------------------
+    # Heartbeat
+    # --------------------------------------------------------
+
+    async def _emit_heartbeat(
+        self, *, force: bool = False, stopping: bool = False
+    ) -> None:
+        """Publish a heartbeat event so the dashboard can show agent status."""
+        now = time.monotonic()
+        if not force and (now - self._last_heartbeat) < self.HEARTBEAT_INTERVAL:
+            return
+        self._last_heartbeat = now
+
+        await self.bus.publish_ui_event(
+            "agent_heartbeat",
+            {
+                "agent": self.role.value,
+                "status": "stopping" if stopping else self.status.value,
+                "model": self._model,
+                "stats": self.stats.snapshot(),
+            },
+        )
+
+    # --------------------------------------------------------
+    # Reliable Message Processing
+    # --------------------------------------------------------
 
     async def _handle_message_reliable(
         self, stream_name: str, entry_id: str, message: AgentMessage
     ) -> None:
-        """Process a message with acknowledgment and dead-letter support."""
-        try:
-            await self._handle_message(message)
-            # Success — acknowledge the message
-            await self.bus.acknowledge(stream_name, entry_id)
-        except Exception as e:
-            logger.error(
-                "message_processing_failed",
-                agent=self.role.value,
-                msg_id=message.id,
-                error=str(e),
-            )
-            # Move to dead letter after too many failures
-            # (XAUTOCLAIM delivery count tracking handles retry counting)
-            await self.bus.move_to_dead_letter(
-                stream_name, entry_id, message,
-                reason=f"Agent {self.role.value} processing error: {e}",
-            )
+        """Process a message with retry, ack, and dead-letter support."""
+        self.stats.messages_received += 1
+        self.stats.projects_touched.add(message.project_id)
+
+        last_error: Exception | None = None
+        for attempt in range(1 + self.MAX_PROCESSING_RETRIES):
+            try:
+                await self._handle_message(message)
+                # Success
+                await self.bus.acknowledge(stream_name, entry_id)
+                return
+            except Exception as e:
+                last_error = e
+                self.stats.messages_failed += 1
+                logger.warning(
+                    "message_processing_failed",
+                    agent=self.role.value,
+                    msg_id=message.id,
+                    attempt=attempt + 1,
+                    error=str(e),
+                )
+                if attempt < self.MAX_PROCESSING_RETRIES:
+                    await asyncio.sleep(2)  # Brief pause before retry
+
+        # All retries exhausted — dead-letter
+        self.stats.messages_dead_lettered += 1
+        await self.bus.move_to_dead_letter(
+            stream_name,
+            entry_id,
+            message,
+            reason=f"Agent {self.role.value} failed after {1 + self.MAX_PROCESSING_RETRIES} attempts: {last_error}",
+        )
+
     async def _handle_message(self, message: AgentMessage) -> None:
-        """Route an incoming message to the appropriate handler."""
+        """Route an incoming message to the agent-specific handler."""
+        self._processing = True
         self.status = AgentStatus.THINKING
         logger.info(
             "message_received",
             agent=self.role.value,
-            sender=message.sender,
-            type=message.type,
+            sender=message.sender.value,
+            type=message.type.value,
             project_id=message.project_id,
         )
 
         try:
-            # Save message to DB for history
+            # Persist for history
             await self.db.save_message(message.model_dump(mode="json"))
 
-            # Dispatch to the agent's specific handler
+            # Dispatch to subclass
             response = await self.process_message(message)
 
             if response:
                 await self.bus.publish(response)
                 await self.db.save_message(response.model_dump(mode="json"))
+                self.stats.messages_sent += 1
 
         except Exception as e:
             logger.error(
@@ -163,7 +318,9 @@ class BaseAgent(ABC):
                 error=str(e),
                 message_id=message.id,
             )
+            raise  # Let _handle_message_reliable decide retry/dead-letter
         finally:
+            self._processing = False
             self.status = AgentStatus.IDLE
 
     @abstractmethod
@@ -175,28 +332,77 @@ class BaseAgent(ABC):
         ...
 
     # --------------------------------------------------------
-    # LLM Interaction Helpers
+    # Per-Project Conversation Memory
     # --------------------------------------------------------
 
-    async def think(self, prompt: str, *, temperature: float = 0.7, max_tokens: int = 4096) -> str:
-        """Send a prompt to the LLM with the agent's system prompt and history.
+    def _get_history(self, project_id: str) -> list[ConversationEntry]:
+        """Get (or create) the conversation history for a project."""
+        if project_id not in self._project_histories:
+            self._project_histories[project_id] = []
+        return self._project_histories[project_id]
 
-        Context window management is handled automatically by OllamaClient.
-        If conversation history is too long, older messages are trimmed.
+    def _append_history(
+        self, project_id: str, role: str, content: str
+    ) -> None:
+        """Append a turn to a project's history, auto-pruning old turns."""
+        history = self._get_history(project_id)
+        history.append(ConversationEntry(role=role, content=content))
+
+        # Auto-prune: keep the most recent turns only
+        if len(history) > self.MAX_HISTORY_PER_PROJECT:
+            # Keep system-prompt-relevant early turns and recent ones
+            overflow = len(history) - self.MAX_HISTORY_PER_PROJECT
+            del history[:overflow]
+
+    def clear_history(self, project_id: str | None = None) -> None:
+        """Clear conversation history for one project or all projects."""
+        if project_id:
+            self._project_histories.pop(project_id, None)
+        else:
+            self._project_histories.clear()
+
+    # --------------------------------------------------------
+    # LLM Interaction
+    # --------------------------------------------------------
+
+    async def think(
+        self,
+        prompt: str,
+        *,
+        project_id: str = "",
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> str:
+        """Send a prompt to the LLM with system prompt and per-project history.
+
+        Args:
+            prompt: The user-role content to send.
+            project_id: Isolates conversation history by project.  If empty,
+                        uses a shared "_global" bucket (for non-project queries).
+            temperature: Sampling temperature.
+            max_tokens: Max tokens in the response.
+
+        Returns:
+            The assistant's response text.
+
+        Context window management is handled automatically by OllamaClient
+        (auto_trim=True).  Older history entries are dropped first.
         """
+        pid = project_id or "_global"
         self.status = AgentStatus.WORKING
 
-        # Build the chat messages
-        messages = [{"role": "system", "content": self._system_prompt}]
+        # Build messages list
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": self._system_prompt}
+        ]
 
-        # Add conversation history (OllamaClient will auto-trim if needed)
-        for entry in self._conversation_history:
+        # Per-project history (OllamaClient auto-trims if too long)
+        for entry in self._get_history(pid):
             messages.append({"role": entry.role, "content": entry.content})
 
-        # Add the current prompt
         messages.append({"role": "user", "content": prompt})
 
-        # Call Ollama (auto_trim=True handles context overflow)
+        t0 = time.monotonic()
         try:
             response = await self.ollama.chat(
                 messages,
@@ -206,24 +412,21 @@ class BaseAgent(ABC):
                 auto_trim=True,
             )
         except Exception as e:
+            self.stats.llm_errors += 1
             logger.error("agent_think_error", agent=self.role.value, error=str(e))
             self.status = AgentStatus.ERROR
             raise
 
-        # Update conversation history
-        self._conversation_history.append(
-            ConversationEntry(role="user", content=prompt)
-        )
-        self._conversation_history.append(
-            ConversationEntry(role="assistant", content=response)
-        )
+        elapsed = time.monotonic() - t0
+        self.stats.llm_calls += 1
+        self.stats.total_think_seconds += elapsed
+
+        # Record in per-project history
+        self._append_history(pid, "user", prompt)
+        self._append_history(pid, "assistant", response)
 
         self.status = AgentStatus.IDLE
         return response
-
-    def clear_history(self) -> None:
-        """Clear the agent's conversation history."""
-        self._conversation_history.clear()
 
     # --------------------------------------------------------
     # Message Sending Helpers
@@ -265,6 +468,7 @@ class BaseAgent(ABC):
         content: str,
         task_id: str = "",
         artifacts: list[str] | None = None,
+        metadata: dict[str, str] | None = None,
         priority: Priority = Priority.NORMAL,
     ) -> None:
         """Create and publish a message in one step."""
@@ -275,7 +479,26 @@ class BaseAgent(ABC):
             content=content,
             task_id=task_id,
             artifacts=artifacts,
+            metadata=metadata,
             priority=priority,
         )
         await self.bus.publish(msg)
         await self.db.save_message(msg.model_dump(mode="json"))
+        self.stats.messages_sent += 1
+
+    # --------------------------------------------------------
+    # Agent Info (for API / Dashboard)
+    # --------------------------------------------------------
+
+    def get_info(self) -> dict[str, Any]:
+        """Return a snapshot of agent state for the monitoring API."""
+        return {
+            "role": self.role.value,
+            "status": self.status.value,
+            "model": self._model,
+            "active_projects": list(self._project_histories.keys()),
+            "history_sizes": {
+                pid: len(h) for pid, h in self._project_histories.items()
+            },
+            "stats": self.stats.snapshot(),
+        }

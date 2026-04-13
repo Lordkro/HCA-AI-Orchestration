@@ -86,7 +86,7 @@ Create ALL necessary files for a working implementation. Include:
 - Requirements/dependency files (if needed)
 - README or usage notes"""
 
-        response = await self.think(prompt, temperature=0.4)
+        response = await self.think(prompt, project_id=message.project_id, temperature=0.4)
 
         # Parse and save artifacts
         artifacts = self._parse_file_outputs(response, message.project_id, message.task_id)
@@ -123,7 +123,7 @@ Address ALL issues mentioned in the feedback. Output the complete corrected file
 
 Only output files that have changed."""
 
-        response = await self.think(prompt, temperature=0.3)
+        response = await self.think(prompt, project_id=message.project_id, temperature=0.3)
 
         artifacts = self._parse_file_outputs(response, message.project_id, message.task_id)
         for artifact in artifacts:
@@ -148,7 +148,7 @@ Only output files that have changed."""
 
 Provide a clear answer with code examples if needed."""
 
-        response = await self.think(prompt)
+        response = await self.think(prompt, project_id=message.project_id)
 
         return self.create_message(
             recipient=message.sender,

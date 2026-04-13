@@ -135,12 +135,18 @@
   - Duplicate-safe message saving (`INSERT OR IGNORE`)
   - `get_latest_artifact()` for version-aware file retrieval
 
-- [ ] **1.5 — Base Agent framework**
-  - Create abstract `BaseAgent` class
-  - Implement agent lifecycle (start, listen, process, respond)
-  - Add system prompt management
-  - Implement conversation memory (per-agent context window)
-  - Add logging and error handling
+- [x] **1.5 — Base Agent framework** ✅
+  - Abstract `BaseAgent` with full lifecycle (start → heartbeat → consume → process → stop)
+  - Per-project conversation memory isolation (agents don't mix project contexts)
+  - LLM interaction via `think()` with automatic context-window trimming
+  - `AgentStats` dataclass — messages received/sent/failed, LLM calls, think time, uptime
+  - Heartbeat events every 30s for dashboard agent-status display
+  - Graceful shutdown with in-flight message draining (up to 60s)
+  - Hot-reloadable system prompts (`reload_prompt()`)
+  - Retry-before-dead-letter (1 retry attempt before moving to DLQ)
+  - `get_info()` for monitoring API — role, status, model, active projects, stats
+  - All concrete agents updated to pass `project_id` to `think()`
+  - Agent API routes updated to use `get_info()`
 
 **Deliverable:** Agents can start up, connect to Redis, send/receive messages, call Ollama, and persist state.
 

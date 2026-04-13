@@ -98,7 +98,7 @@ Remember our team:
 
 Think step by step about what needs to be built and in what order."""
 
-        response = await self.think(prompt)
+        response = await self.think(prompt, project_id=project.id)
 
         # Send the plan to the research agent to begin
         return self.create_message(
@@ -127,7 +127,7 @@ As the Project Manager, decide the next step:
 
 What should happen next? Specify the recipient agent and your instructions."""
 
-        response = await self.think(prompt)
+        response = await self.think(prompt, project_id=message.project_id)
 
         # Route to the next agent in the pipeline
         next_agent = self._determine_next_agent(message.sender)
@@ -159,7 +159,7 @@ What should happen next? Specify the recipient agent and your instructions."""
 Based on this feedback, decide what action to take and who should address it.
 Provide clear instructions for the next agent."""
 
-        response = await self.think(prompt)
+        response = await self.think(prompt, project_id=message.project_id)
 
         # Route feedback to the appropriate agent
         return self.create_message(
@@ -178,7 +178,7 @@ Provide clear instructions for the next agent."""
 
 Please provide a clear, decisive answer to help them proceed."""
 
-        response = await self.think(prompt)
+        response = await self.think(prompt, project_id=message.project_id)
 
         return self.create_message(
             recipient=message.sender,
