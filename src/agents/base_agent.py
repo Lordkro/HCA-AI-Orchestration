@@ -142,24 +142,37 @@ class BaseAgent(ABC):
     # LLM Interaction Helpers
     # --------------------------------------------------------
 
-    async def think(self, prompt: str, *, temperature: float = 0.7) -> str:
-        """Send a prompt to the LLM with the agent's system prompt and history."""
+    async def think(self, prompt: str, *, temperature: float = 0.7, max_tokens: int = 4096) -> str:
+        """Send a prompt to the LLM with the agent's system prompt and history.
+
+        Context window management is handled automatically by OllamaClient.
+        If conversation history is too long, older messages are trimmed.
+        """
         self.status = AgentStatus.WORKING
 
         # Build the chat messages
         messages = [{"role": "system", "content": self._system_prompt}]
 
-        # Add recent conversation history (keep last N turns to fit context)
-        for entry in self._conversation_history[-20:]:
+        # Add conversation history (OllamaClient will auto-trim if needed)
+        for entry in self._conversation_history:
             messages.append({"role": entry.role, "content": entry.content})
 
         # Add the current prompt
         messages.append({"role": "user", "content": prompt})
 
-        # Call Ollama
-        response = await self.ollama.chat(
-            messages, model=self._model, temperature=temperature
-        )
+        # Call Ollama (auto_trim=True handles context overflow)
+        try:
+            response = await self.ollama.chat(
+                messages,
+                model=self._model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                auto_trim=True,
+            )
+        except Exception as e:
+            logger.error("agent_think_error", agent=self.role.value, error=str(e))
+            self.status = AgentStatus.ERROR
+            raise
 
         # Update conversation history
         self._conversation_history.append(

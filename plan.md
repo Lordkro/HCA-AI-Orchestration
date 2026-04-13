@@ -113,7 +113,7 @@
   - Create base `Dockerfile` and `docker-compose.yml`
   - Set up `.env` for configuration
 
-- [ ] **1.2 — Ollama integration layer**
+- [x] **1.2 — Ollama integration layer**
   - Create `OllamaClient` wrapper class
   - Support configurable models per agent
   - Handle prompt formatting, streaming, retries

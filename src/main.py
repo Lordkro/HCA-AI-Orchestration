@@ -38,7 +38,17 @@ async def main() -> None:
         base_url=settings.ollama_base_url,
         default_model=settings.ollama_default_model,
         timeout=settings.ollama_timeout,
+        num_ctx=settings.ollama_num_ctx,
+        max_retries=settings.ollama_max_retries,
+        retry_base_delay=settings.ollama_retry_base_delay,
     )
+
+    # Validate Ollama connection and preload default model
+    if not await ollama.health_check():
+        logger.error("Ollama is not reachable", url=settings.ollama_base_url)
+        return
+    logger.info("Ollama connected, preloading default model...")
+    await ollama.preload_model()
 
     # Initialize agents
     agents = [

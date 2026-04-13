@@ -21,6 +21,16 @@ async def list_agents(request: Request) -> list[dict]:
     ]
 
 
+@router.get("/stats")
+async def get_ollama_stats(request: Request) -> dict:
+    """Get Ollama client statistics (token usage, performance)."""
+    # All agents share the same OllamaClient instance
+    agents = request.app.state.agents
+    if agents:
+        return agents[0].ollama.get_stats()
+    return {}
+
+
 @router.get("/{role}")
 async def get_agent(role: str, request: Request) -> dict:
     """Get the status of a specific agent."""

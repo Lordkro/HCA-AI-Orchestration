@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     ollama_coder_model: str = "qwen2.5-coder:32b"
     ollama_timeout: int = 120
     ollama_num_ctx: int = 8192
+    ollama_max_retries: int = 3
+    ollama_retry_base_delay: float = 2.0
 
     # Per-agent model overrides (empty string = use default)
     ollama_pm_model: str = ""
