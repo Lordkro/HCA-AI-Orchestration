@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HCA Orchestration — AI Development Team</title>
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+    <header>
+        <div class="header-content">
+            <h1>🧠 HCA Orchestration</h1>
+            <p class="subtitle">Hybrid Cognitive Architecture — Autonomous AI Development Team</p>
+        </div>
+        <div class="connection-status" id="connectionStatus">
+            <span class="status-dot disconnected"></span>
+            <span>Disconnected</span>
+        </div>
+    </header>
+
+    <main>
+        <!-- New Project Panel -->
+        <section class="panel new-project-panel">
+            <h2>🚀 New Project</h2>
+            <textarea id="ideaInput" placeholder="Describe your product idea here... Be as detailed as you like. The PM agent will break it down into tasks and coordinate the team."></textarea>
+            <div class="input-row">
+                <input type="text" id="projectName" placeholder="Project name (optional)">
+                <button id="submitIdea" onclick="submitIdea()">Submit to Team</button>
+            </div>
+        </section>
+
+        <div class="dashboard-grid">
+            <!-- Agent Status Panel -->
+            <section class="panel agent-panel">
+                <h2>🤖 Agent Status</h2>
+                <div id="agentList" class="agent-list">
+                    <p class="loading">Loading agents...</p>
+                </div>
+            </section>
+
+            <!-- Activity Feed -->
+            <section class="panel activity-panel">
+                <h2>💬 Agent Activity</h2>
+                <div id="activityFeed" class="activity-feed">
+                    <p class="empty-state">Waiting for activity...</p>
+                </div>
+            </section>
+        </div>
+
+        <!-- Projects List -->
+        <section class="panel projects-panel">
+            <h2>📁 Projects</h2>
+            <div id="projectsList" class="projects-list">
+                <p class="loading">Loading projects...</p>
+            </div>
+        </section>
+    </main>
+
+    <script src="/js/app.js"></script>
+</body>
+</html>

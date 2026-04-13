@@ -1,0 +1,109 @@
+# ============================================================
+# HCA Orchestration - Docker Compose
+# ============================================================
+# Autonomous AI development team powered by Ollama
+#
+# Usage:
+#   docker compose up              - Start all services
+#   docker compose up -d           - Start in background
+#   docker compose down            - Stop all services
+#   docker compose logs -f         - Follow logs
+#   docker compose logs -f agent   - Follow agent logs only
+# ============================================================
+
+services:
+  # --------------------------------------------------------
+  # Ollama - Local LLM inference with ROCm (AMD GPU)
+  # --------------------------------------------------------
+  ollama:
+    image: ollama/ollama:rocm
+    container_name: hca-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    environment:
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_MAX_LOADED_MODELS=2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # --------------------------------------------------------
+  # Redis - Message bus for agent communication
+  # --------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: hca-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --------------------------------------------------------
+  # HCA Orchestrator - Agents + API in one service
+  # --------------------------------------------------------
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hca-orchestrator
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./workspace:/workspace
+      - ./data:/data
+      - ./src:/app/src
+    env_file:
+      - .env
+    depends_on:
+      ollama:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  # --------------------------------------------------------
+  # Model Puller - One-time setup to pull required models
+  # --------------------------------------------------------
+  model-puller:
+    image: curlimages/curl:latest
+    container_name: hca-model-puller
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Pulling default model: qwen2.5:32b ..."
+        curl -s http://ollama:11434/api/pull -d '{"name": "qwen2.5:32b"}' | head -1
+        echo ""
+        echo "Pulling coder model: qwen2.5-coder:32b ..."
+        curl -s http://ollama:11434/api/pull -d '{"name": "qwen2.5-coder:32b"}' | head -1
+        echo ""
+        echo "All models pulled successfully!"
+    profiles:
+      - setup
+
+volumes:
+  ollama_data:
+  redis_data:
