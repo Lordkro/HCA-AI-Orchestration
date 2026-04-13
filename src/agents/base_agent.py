@@ -68,26 +68,41 @@ class BaseAgent(ABC):
             logger.warning("prompt_default", agent=self.role.value, file=str(prompt_file))
 
     async def start(self) -> None:
-        """Start the agent's message processing loop."""
+        """Start the agent's message processing loop.
+
+        Uses Redis consumer groups for reliable message delivery:
+        1. First, claim any stale messages from previous crashes
+        2. Then consume new messages from the inbox
+        3. Acknowledge each message after successful processing
+        4. Dead-letter messages that repeatedly fail
+        """
         self._running = True
         self.status = AgentStatus.IDLE
         logger.info("agent_started", agent=self.role.value, model=self._model)
 
-        last_id = "$"  # Only read new messages
         while self._running:
             try:
-                messages = await self.bus.consume(
-                    self.role, last_id=last_id, block_ms=2000
+                # 1. Reclaim any stale/orphaned messages first
+                stale = await self.bus.claim_stale_messages(self.role, min_idle_ms=120_000)
+                for stream_name, entry_id, msg in stale:
+                    if msg.sender != self.role:
+                        await self._handle_message_reliable(stream_name, entry_id, msg)
+
+                # 2. Consume new messages
+                results = await self.bus.consume(
+                    self.role, last_id=">", block_ms=2000
                 )
-                for msg in messages:
+                for stream_name, entry_id, msg in results:
                     # Skip messages sent by self
                     if msg.sender == self.role:
+                        await self.bus.acknowledge(stream_name, entry_id)
                         continue
-                    await self._handle_message(msg)
+                    await self._handle_message_reliable(stream_name, entry_id, msg)
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("agent_error", agent=self.role.value, error=str(e))
+                logger.error("agent_loop_error", agent=self.role.value, error=str(e))
                 self.status = AgentStatus.ERROR
                 await asyncio.sleep(5)  # Back off on error
 
@@ -98,6 +113,27 @@ class BaseAgent(ABC):
         """Signal the agent to stop processing."""
         self._running = False
 
+    async def _handle_message_reliable(
+        self, stream_name: str, entry_id: str, message: AgentMessage
+    ) -> None:
+        """Process a message with acknowledgment and dead-letter support."""
+        try:
+            await self._handle_message(message)
+            # Success — acknowledge the message
+            await self.bus.acknowledge(stream_name, entry_id)
+        except Exception as e:
+            logger.error(
+                "message_processing_failed",
+                agent=self.role.value,
+                msg_id=message.id,
+                error=str(e),
+            )
+            # Move to dead letter after too many failures
+            # (XAUTOCLAIM delivery count tracking handles retry counting)
+            await self.bus.move_to_dead_letter(
+                stream_name, entry_id, message,
+                reason=f"Agent {self.role.value} processing error: {e}",
+            )
     async def _handle_message(self, message: AgentMessage) -> None:
         """Route an incoming message to the appropriate handler."""
         self.status = AgentStatus.THINKING

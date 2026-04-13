@@ -34,6 +34,12 @@ async def main() -> None:
     bus = MessageBus(settings.redis_url)
     await bus.connect()
 
+    # Initialize agent streams and consumer groups
+    from src.core.models import AgentRole
+    agent_roles = [AgentRole.PM, AgentRole.RESEARCH, AgentRole.SPEC, AgentRole.CODER, AgentRole.CRITIC]
+    await bus.setup_agent_streams(agent_roles)
+    logger.info("Message bus ready with consumer groups")
+
     ollama = OllamaClient(
         base_url=settings.ollama_base_url,
         default_model=settings.ollama_default_model,

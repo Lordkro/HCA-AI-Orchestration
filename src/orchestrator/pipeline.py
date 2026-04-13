@@ -11,17 +11,26 @@ from src.orchestrator.task_manager import TaskManager
 
 logger = structlog.get_logger()
 
+# How often to run maintenance tasks (seconds)
+HEALTH_CHECK_INTERVAL = 30
+STREAM_TRIM_INTERVAL = 300  # 5 minutes
+
 
 class Pipeline:
     """Manages the overall agent workflow pipeline.
 
     Standard flow: PM → Research → Spec → Code → Critic → (iterate) → Done
+
+    Also handles periodic maintenance:
+    - Stream trimming to prevent unbounded memory growth
+    - Health checks for stuck tasks and deadlocks
     """
 
     def __init__(self, *, task_manager: TaskManager, bus: MessageBus) -> None:
         self.task_manager = task_manager
         self.bus = bus
         self._running = False
+        self._tick_count = 0
 
     async def start(self) -> None:
         """Start the pipeline monitor."""
@@ -30,10 +39,16 @@ class Pipeline:
 
         while self._running:
             try:
-                # The pipeline is event-driven via messages.
-                # This loop monitors for stuck tasks and deadlocks.
+                self._tick_count += 1
+
+                # Health check every tick
                 await self._check_health()
-                await asyncio.sleep(30)  # Check every 30 seconds
+
+                # Stream maintenance less frequently
+                if self._tick_count % (STREAM_TRIM_INTERVAL // HEALTH_CHECK_INTERVAL) == 0:
+                    await self.bus.trim_streams()
+
+                await asyncio.sleep(HEALTH_CHECK_INTERVAL)
             except asyncio.CancelledError:
                 break
             except Exception as e:

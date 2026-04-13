@@ -119,7 +119,7 @@
   - Handle prompt formatting, streaming, retries
   - Add token/context window management
 
-- [ ] **1.3 — Message bus (Redis Streams)**
+- [x] **1.3 — Message bus (Redis Streams)**
   - Set up Redis in Docker Compose
   - Create `MessageBus` class for publish/subscribe
   - Define message schema (sender, recipient, type, payload, timestamp)
