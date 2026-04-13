@@ -155,13 +155,14 @@
 ### Phase 1.6: Testing Foundation
 > Comprehensive unit and integration tests for all hardened foundation layers.
 
-- [ ] **1.6 — Test suite**
+- [x] **1.6 — Test suite** ✅
   - Shared fixtures in `conftest.py` (temp DB, mock Ollama, mock Redis bus)
   - `test_ollama_client.py` — token estimation, context trimming, retry logic, stats
   - `test_message_bus.py` — publish/consume round-trip, ack, dead-letter, UI events (requires Redis mock)
   - `test_database.py` — full CRUD for projects/tasks/artifacts/messages, migrations, search, pagination, stats
   - `test_agents.py` — BaseAgent lifecycle, per-project memory, heartbeat, graceful stop, message routing
   - `test_pipeline.py` — TaskManager state machine, valid/invalid transitions, iteration limits
+  - **114 tests, all passing in 6.78s, fully offline**
 
 **Deliverable:** `pytest` passes with full coverage of Phases 1.1–1.5. All tests run offline (no Ollama, no Redis required).
 
