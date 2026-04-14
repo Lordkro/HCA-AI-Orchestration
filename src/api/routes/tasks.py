@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from src.core.models import TaskState
 
@@ -24,5 +24,5 @@ async def get_task(task_id: str, request: Request) -> dict:
     db = request.app.state.db
     task = await db.get_task(task_id)
     if not task:
-        return {"error": "Task not found"}
+        raise HTTPException(status_code=404, detail="Task not found")
     return task.model_dump(mode="json")

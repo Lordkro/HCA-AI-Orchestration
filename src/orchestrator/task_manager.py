@@ -1,4 +1,8 @@
-"""Task state machine and management."""
+"""Task state machine and management.
+
+Integrates with Guardrails to enforce safety limits on iteration
+counts, task counts per project, and task timeouts.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ import structlog
 from src.core.database import Database
 from src.core.message_bus import MessageBus
 from src.core.models import Task, TaskState, AgentRole
+from src.orchestrator.guardrails import Guardrails
 
 logger = structlog.get_logger()
 
@@ -26,11 +31,22 @@ VALID_TRANSITIONS: dict[TaskState, list[TaskState]] = {
 
 
 class TaskManager:
-    """Manages task lifecycle and state transitions."""
+    """Manages task lifecycle and state transitions.
 
-    def __init__(self, *, db: Database, bus: MessageBus) -> None:
+    Uses :class:`Guardrails` to enforce per-task iteration limits,
+    per-project task count caps, and task timeouts.
+    """
+
+    def __init__(
+        self,
+        *,
+        db: Database,
+        bus: MessageBus,
+        guardrails: Guardrails | None = None,
+    ) -> None:
         self.db = db
         self.bus = bus
+        self.guardrails = guardrails or Guardrails()
 
     async def create_task(
         self,
@@ -41,7 +57,18 @@ class TaskManager:
         assigned_to: AgentRole | None = None,
         max_iterations: int = 5,
     ) -> Task:
-        """Create a new task in the pending state."""
+        """Create a new task in the pending state.
+
+        Raises ValueError if the project has reached its task limit.
+        """
+        # Guardrail: check task count
+        current_count = await self.db.count_tasks(project_id)
+        if not self.guardrails.check_task_limit(current_count):
+            raise ValueError(
+                f"Project {project_id} has reached the maximum task limit "
+                f"({self.guardrails.max_tasks})"
+            )
+
         task = Task(
             project_id=project_id,
             title=title,
@@ -73,14 +100,14 @@ class TaskManager:
         # Handle iteration counting for revision cycles
         if new_state == TaskState.REVISION:
             task.iteration += 1
-            if task.iteration >= task.max_iterations:
+            if not self.guardrails.should_allow_revision(task):
                 logger.warning(
-                    "task_max_iterations",
+                    "task_guardrail_failed",
                     task_id=task.id,
                     iterations=task.iteration,
                 )
                 task.state = TaskState.FAILED
-                task.feedback = "Maximum revision iterations reached"
+                task.feedback = "Guardrail triggered: maximum iterations or timeout reached"
 
         await self.db.update_task(task)
 

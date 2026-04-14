@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pydantic import BaseModel
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from src.core.models import (
     AgentMessage,
@@ -62,7 +62,7 @@ async def get_project(project_id: str, request: Request) -> dict:
     db = request.app.state.db
     project = await db.get_project(project_id)
     if not project:
-        return {"error": "Project not found"}
+        raise HTTPException(status_code=404, detail="Project not found")
 
     progress = await request.app.state.task_manager.get_project_progress(project_id)
     messages = await db.get_project_messages(project_id)

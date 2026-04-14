@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter()
 
@@ -30,4 +30,4 @@ async def get_agent(role: str, request: Request) -> dict:
     for agent in agents:
         if agent.role.value == role:
             return agent.get_info()
-    return {"error": f"Agent '{role}' not found"}
+    raise HTTPException(status_code=404, detail=f"Agent '{role}' not found")

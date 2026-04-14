@@ -12,7 +12,6 @@ from src.core.models import (
     AgentRole,
     MessageType,
     Priority,
-    Project,
     Task,
     TaskState,
 )
@@ -63,16 +62,14 @@ class PMAgent(BaseAgent):
                 return None
 
     async def _handle_new_project(self, message: AgentMessage) -> AgentMessage | None:
-        """Break down a new product idea into a project plan."""
-        idea = message.payload.content
+        """Break down a new product idea into a project plan.
 
-        # Create the project in the database
-        project = Project(
-            name=f"Project from idea",
-            description=idea,
-            idea=idea,
-        )
-        await self.db.create_project(project)
+        The project has already been created by the API route and its ID
+        is carried in ``message.project_id``.  The PM agent's job is to
+        decompose the idea into a plan and kick off the pipeline.
+        """
+        idea = message.payload.content
+        project_id = message.project_id
 
         # Ask the LLM to decompose the idea into tasks
         prompt = f"""A user has submitted a new product idea for our AI development team to build.
@@ -98,48 +95,74 @@ Remember our team:
 
 Think step by step about what needs to be built and in what order."""
 
-        response = await self.think(prompt, project_id=project.id)
+        response = await self.think(prompt, project_id=project_id)
 
         # Send the plan to the research agent to begin
         return self.create_message(
             recipient=AgentRole.RESEARCH,
             msg_type=MessageType.TASK_ASSIGNMENT,
-            project_id=project.id,
+            project_id=project_id,
             content=response,
             priority=Priority.HIGH,
             metadata={"original_idea": idea},
         )
 
     async def _handle_deliverable(self, message: AgentMessage) -> AgentMessage | None:
-        """Handle a completed deliverable from an agent."""
-        prompt = f"""An agent has submitted a deliverable for review.
+        """Handle a completed deliverable from an agent.
+
+        Uses metadata from the Critic to decide whether to approve or
+        route back for revision.  For other agents the standard pipeline
+        order is followed: Research → Spec → Coder → Critic.
+        """
+        review_result = message.payload.metadata.get("review_result", "")
+
+        # --- Critic approved → mark done / advance ---
+        if message.sender == AgentRole.CRITIC and review_result == "approved":
+            logger.info(
+                "pm_deliverable_approved",
+                project_id=message.project_id,
+                task_id=message.task_id,
+            )
+            # Notify all agents that the task is complete
+            return self.create_message(
+                recipient=AgentRole.RESEARCH,
+                msg_type=MessageType.STATUS_UPDATE,
+                project_id=message.project_id,
+                task_id=message.task_id,
+                content=f"Task approved by Critic. Output:\n\n{message.payload.content}",
+                metadata={"status": "approved"},
+            )
+
+        # --- Critic rejected → route feedback to the appropriate agent ---
+        if message.sender == AgentRole.CRITIC and review_result == "needs_revision":
+            return await self._handle_feedback(message)
+
+        # --- Standard pipeline progression (non-critic deliverables) ---
+        next_agent = self._determine_next_agent(message.sender)
+        if next_agent is None:
+            return None
+
+        prompt = f"""An agent has submitted a deliverable.
 
 FROM: {message.sender.value} agent
-TASK ID: {message.task_id}
-DELIVERABLE:
-{message.payload.content}
+DELIVERABLE (summary):
+{message.payload.content[:2000]}
 
-As the Project Manager, decide the next step:
-1. If this is from the Research or Spec agent, route the output to the next agent in the pipeline.
-2. If this is from the Coder agent, send it to the Critic for review.
-3. If this is from the Critic agent with approval, mark the task as done.
-4. If this is from the Critic agent with rejection, send feedback back to the appropriate agent.
-
-What should happen next? Specify the recipient agent and your instructions."""
+Provide any additional context or instructions for the {next_agent.value} agent
+who will work on this next.  Be concise."""
 
         response = await self.think(prompt, project_id=message.project_id)
 
-        # Route to the next agent in the pipeline
-        next_agent = self._determine_next_agent(message.sender)
-        if next_agent:
-            return self.create_message(
-                recipient=next_agent,
-                msg_type=MessageType.TASK_ASSIGNMENT,
-                project_id=message.project_id,
-                task_id=message.task_id,
-                content=response,
-            )
-        return None
+        # Choose the right message type for the next hop
+        msg_type = MessageType.TASK_ASSIGNMENT
+
+        return self.create_message(
+            recipient=next_agent,
+            msg_type=msg_type,
+            project_id=message.project_id,
+            task_id=message.task_id,
+            content=f"{response}\n\n--- PREVIOUS DELIVERABLE ---\n{message.payload.content}",
+        )
 
     async def _handle_status_update(self, message: AgentMessage) -> AgentMessage | None:
         """Handle status updates from agents."""
@@ -151,24 +174,42 @@ What should happen next? Specify the recipient agent and your instructions."""
         return None
 
     async def _handle_feedback(self, message: AgentMessage) -> AgentMessage | None:
-        """Handle feedback (usually from Critic)."""
+        """Handle feedback (usually from Critic) and route to the right agent.
+
+        Determines which agent should receive the revision request based on
+        the artifact type in the metadata.  Falls back to CODER if unknown.
+        """
+        artifact_type = message.payload.metadata.get("artifact_type", "")
+
+        # Determine who should address the feedback
+        revision_target = self._feedback_target(artifact_type, message.sender)
+
         prompt = f"""The Critic agent has provided feedback:
 
 {message.payload.content}
 
-Based on this feedback, decide what action to take and who should address it.
-Provide clear instructions for the next agent."""
+Based on this feedback, provide clear instructions for the {revision_target.value} agent
+who will make the revisions. Be specific about what needs to change."""
 
         response = await self.think(prompt, project_id=message.project_id)
 
-        # Route feedback to the appropriate agent
         return self.create_message(
-            recipient=AgentRole.CODER,  # Usually goes back to coder
+            recipient=revision_target,
             msg_type=MessageType.FEEDBACK,
             project_id=message.project_id,
             task_id=message.task_id,
             content=response,
         )
+
+    @staticmethod
+    def _feedback_target(artifact_type: str, sender: AgentRole) -> AgentRole:
+        """Decide which agent should receive revision feedback."""
+        type_to_agent = {
+            "code": AgentRole.CODER,
+            "specification": AgentRole.SPEC,
+            "research_report": AgentRole.RESEARCH,
+        }
+        return type_to_agent.get(artifact_type, AgentRole.CODER)
 
     async def _handle_question(self, message: AgentMessage) -> AgentMessage | None:
         """Answer questions from other agents."""

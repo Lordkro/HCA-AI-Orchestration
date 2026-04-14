@@ -360,6 +360,7 @@ class MessageBus:
         original_stream: str,
         entry_id: str,
         message: AgentMessage,
+        *,
         reason: str,
     ) -> None:
         """Move a failed message to the dead letter stream."""

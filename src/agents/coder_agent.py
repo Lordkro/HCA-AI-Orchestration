@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import structlog
 
 from src.agents.base_agent import BaseAgent
@@ -158,22 +161,42 @@ Provide a clear answer with code examples if needed."""
             content=response,
         )
 
+    # --------------------------------------------------------
+    # File Parsing
+    # --------------------------------------------------------
+
+    # Regex patterns for extracting file blocks from LLM output.
+    # Pattern 1 (preferred):  === FILE: path/to/file ===
+    # Pattern 2 (fallback):   **path/to/file**  or  `path/to/file`
+    _FILE_MARKER_RE = re.compile(
+        r"^={2,}\s*FILE:\s*(.+?)\s*={2,}\s*$",
+        re.IGNORECASE,
+    )
+    _FALLBACK_MARKER_RE = re.compile(
+        r"^(?:\*\*|`)([a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+)(?:\*\*|`)\s*$"
+    )
+
     def _parse_file_outputs(
         self, response: str, project_id: str, task_id: str
     ) -> list[Artifact]:
-        """Parse the LLM response to extract file artifacts."""
+        """Parse the LLM response to extract file artifacts.
+
+        Supports the canonical ``=== FILE: path ===`` format and falls
+        back to ``**path**`` or `` `path` `` markers.  Logs warnings when
+        no artifacts are found so issues are visible.
+        """
         artifacts: list[Artifact] = []
         lines = response.split("\n")
         current_file: str | None = None
         current_content: list[str] = []
         in_code_block = False
 
-        for line in lines:
-            # Detect file markers: === FILE: path/to/file ===
-            if line.strip().startswith("=== FILE:") and line.strip().endswith("==="):
-                # Save previous file if any
-                if current_file and current_content:
-                    content = "\n".join(current_content).strip()
+        def _save_current() -> None:
+            """Flush the accumulated content into an Artifact."""
+            nonlocal current_file, current_content, in_code_block
+            if current_file and current_content:
+                content = "\n".join(current_content).strip()
+                if content:
                     artifacts.append(
                         Artifact(
                             project_id=project_id,
@@ -184,29 +207,52 @@ Provide a clear answer with code examples if needed."""
                             artifact_type=self._detect_artifact_type(current_file),
                         )
                     )
-                # Start new file
-                current_file = line.strip().replace("=== FILE:", "").replace("===", "").strip()
-                current_content = []
-                in_code_block = False
-            elif line.strip().startswith("```") and not in_code_block:
+                else:
+                    logger.warning(
+                        "coder_empty_file_content",
+                        filename=current_file,
+                    )
+            current_file = None
+            current_content = []
+            in_code_block = False
+
+        for line in lines:
+            stripped = line.strip()
+
+            # Try canonical marker first
+            m = self._FILE_MARKER_RE.match(stripped)
+            if m:
+                _save_current()
+                current_file = m.group(1).strip()
+                continue
+
+            # Try fallback marker
+            m2 = self._FALLBACK_MARKER_RE.match(stripped)
+            if m2 and not in_code_block:
+                _save_current()
+                current_file = m2.group(1).strip()
+                continue
+
+            # Handle code fences
+            if stripped.startswith("```") and not in_code_block:
                 in_code_block = True
-            elif line.strip() == "```" and in_code_block:
+                continue
+            if stripped == "```" and in_code_block:
                 in_code_block = False
-            elif current_file is not None:
+                continue
+
+            # Accumulate content when inside a file block
+            if current_file is not None:
                 current_content.append(line)
 
-        # Don't forget the last file
-        if current_file and current_content:
-            content = "\n".join(current_content).strip()
-            artifacts.append(
-                Artifact(
-                    project_id=project_id,
-                    task_id=task_id,
-                    agent=AgentRole.CODER,
-                    filename=current_file,
-                    content=content,
-                    artifact_type=self._detect_artifact_type(current_file),
-                )
+        # Flush the last file
+        _save_current()
+
+        if not artifacts:
+            logger.warning(
+                "coder_no_artifacts_parsed",
+                response_length=len(response),
+                hint="LLM output did not contain recognised file markers",
             )
 
         return artifacts
@@ -224,8 +270,6 @@ Provide a clear answer with code examples if needed."""
 
     async def _write_to_workspace(self, artifact: Artifact, project_id: str) -> None:
         """Write an artifact to the workspace filesystem."""
-        from pathlib import Path
-
         workspace = Path(settings.workspace_dir) / project_id
         file_path = workspace / artifact.filename
         file_path.parent.mkdir(parents=True, exist_ok=True)

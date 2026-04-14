@@ -281,18 +281,27 @@ class Database:
             return [Project(**dict(row)) for row in rows]
 
     async def update_project(self, project_id: str, **fields: Any) -> None:
-        """Update specific fields on a project."""
+        """Update specific fields on a project.
+
+        Only fields in the ``_ALLOWED_PROJECT_UPDATES`` set are accepted;
+        all others are silently ignored.  Field names are validated against
+        a static allowlist so they are never interpolated from user input.
+        """
         allowed = {"name", "description", "status"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return
+
+        # Safety assertion: field names MUST come from the static allowlist
+        assert all(k in allowed for k in updates), "BUG: disallowed field in update"
 
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [project_id]
 
         await self.db.execute(
-            f"UPDATE projects SET {set_clause} WHERE id = ?", values
+            f"UPDATE projects SET {set_clause} WHERE id = ?",  # noqa: S608 — field names from static allowlist
+            values,
         )
         await self.db.commit()
 

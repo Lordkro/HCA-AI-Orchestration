@@ -79,6 +79,13 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
+class MessagePayload(BaseModel):
+    """The content portion of an agent message."""
+    content: str
+    artifacts: list[str] = Field(default_factory=list)
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
 class AgentMessage(BaseModel):
     """A message passed between agents via the message bus."""
     id: str = Field(default_factory=_new_id)
@@ -90,13 +97,6 @@ class AgentMessage(BaseModel):
     task_id: str = ""
     payload: MessagePayload
     priority: Priority = Priority.NORMAL
-
-
-class MessagePayload(BaseModel):
-    """The content portion of an agent message."""
-    content: str
-    artifacts: list[str] = Field(default_factory=list)
-    metadata: dict[str, str] = Field(default_factory=dict)
 
 
 class Project(BaseModel):

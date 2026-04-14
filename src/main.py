@@ -1,7 +1,9 @@
 """HCA Orchestration - Application entrypoint."""
 
 import asyncio
+import os
 import signal
+import sys
 
 import structlog
 
@@ -89,8 +91,17 @@ async def main() -> None:
         shutdown_event.set()
 
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _signal_handler)
+
+    # Unix supports loop.add_signal_handler; Windows does not
+    if sys.platform != "win32":
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, _signal_handler)
+    else:
+        # On Windows, use signal.signal for SIGINT (Ctrl+C).
+        # SIGTERM is not reliably supported on Windows.
+        def _win_handler(signum: int, frame: object) -> None:
+            _signal_handler()
+        signal.signal(signal.SIGINT, _win_handler)
 
     logger.info(
         "HCA Orchestration started",
