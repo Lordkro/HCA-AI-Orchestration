@@ -1,6 +1,6 @@
-"""Phase 3 tests — Orchestration & Workflow Engine.
+"""Tests for orchestration, workflow engine, and guardrails.
 
-Tests for:
+Covers:
 - Task dependencies and dependency-aware ordering
 - Parallel task dispatch
 - Token budget tracking and enforcement
@@ -10,6 +10,7 @@ Tests for:
 - Escalation on guardrail failure
 - Task retry (FAILED → PENDING)
 - Pipeline health checks
+- Database schema v3 fields (depends_on, tokens_used)
 """
 
 from __future__ import annotations
