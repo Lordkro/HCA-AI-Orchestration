@@ -23,11 +23,36 @@ from src.core.models import Artifact, Project, Task, TaskState
 
 logger = structlog.get_logger()
 
+
+# ============================================================
+# Row Helpers
+# ============================================================
+
+
+def _row_to_task(row: Any) -> Task:
+    """Convert a database row to a Task, deserializing JSON fields."""
+    d = dict(row)
+    # depends_on is stored as a JSON list in SQLite
+    raw = d.get("depends_on")
+    if isinstance(raw, str):
+        try:
+            d["depends_on"] = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            d["depends_on"] = []
+    elif raw is None:
+        d["depends_on"] = []
+    return Task(**d)
+
+
+def _row_to_project(row: Any) -> Project:
+    """Convert a database row to a Project."""
+    return Project(**dict(row))
+
 # ============================================================
 # Schema Versioning
 # ============================================================
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 MIGRATIONS: dict[int, str] = {
     # Version 1: Initial schema
@@ -117,6 +142,13 @@ MIGRATIONS: dict[int, str] = {
 
     CREATE INDEX IF NOT EXISTS idx_events_project ON project_events(project_id);
     CREATE INDEX IF NOT EXISTS idx_events_type ON project_events(event_type);
+    """,
+
+    # Version 3: Task dependencies, token tracking
+    3: """
+    ALTER TABLE tasks ADD COLUMN depends_on TEXT DEFAULT '[]';
+    ALTER TABLE tasks ADD COLUMN tokens_used INTEGER DEFAULT 0;
+    ALTER TABLE projects ADD COLUMN tokens_used INTEGER DEFAULT 0;
     """,
 }
 
@@ -343,14 +375,16 @@ class Database:
                 """INSERT INTO tasks
                    (id, project_id, title, description, state, assigned_to,
                     created_at, updated_at, iteration, max_iterations,
-                    parent_task_id, deliverable, feedback, priority)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    parent_task_id, deliverable, feedback, priority,
+                    depends_on, tokens_used)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     task.id, task.project_id, task.title, task.description,
                     task.state.value, task.assigned_to.value if task.assigned_to else None,
                     task.created_at.isoformat(), task.updated_at.isoformat(),
                     task.iteration, task.max_iterations, task.parent_task_id,
                     task.deliverable, task.feedback, task.priority.value,
+                    json.dumps(task.depends_on), task.tokens_used,
                 ),
             )
             await self.db.commit()
@@ -373,7 +407,7 @@ class Database:
         ) as cursor:
             row = await cursor.fetchone()
             if row:
-                return Task(**dict(row))
+                return _row_to_task(row)
         return None
 
     async def list_tasks(
@@ -403,7 +437,7 @@ class Database:
             params,
         ) as cursor:
             rows = await cursor.fetchall()
-            return [Task(**dict(row)) for row in rows]
+            return [_row_to_task(row) for row in rows]
 
     async def update_task(self, task: Task) -> None:
         """Update a task's full state."""
@@ -411,7 +445,8 @@ class Database:
             """UPDATE tasks SET
                state = ?, assigned_to = ?, updated_at = ?,
                iteration = ?, deliverable = ?, feedback = ?,
-               title = ?, description = ?, priority = ?
+               title = ?, description = ?, priority = ?,
+               depends_on = ?, tokens_used = ?
                WHERE id = ?""",
             (
                 task.state.value,
@@ -419,6 +454,7 @@ class Database:
                 datetime.now(timezone.utc).isoformat(),
                 task.iteration, task.deliverable, task.feedback,
                 task.title, task.description, task.priority.value,
+                json.dumps(task.depends_on), task.tokens_used,
                 task.id,
             ),
         )
@@ -443,6 +479,27 @@ class Database:
         async with self.db.execute(query, params) as cursor:
             row = await cursor.fetchone()
             return row["c"] if row else 0
+
+    async def add_project_tokens(self, project_id: str, tokens: int) -> int:
+        """Atomically add to a project's token usage and return the new total."""
+        await self.db.execute(
+            "UPDATE projects SET tokens_used = tokens_used + ? WHERE id = ?",
+            (tokens, project_id),
+        )
+        await self.db.commit()
+        async with self.db.execute(
+            "SELECT tokens_used FROM projects WHERE id = ?", (project_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row["tokens_used"] if row else 0
+
+    async def get_project_tokens(self, project_id: str) -> int:
+        """Get the total tokens used by a project."""
+        async with self.db.execute(
+            "SELECT tokens_used FROM projects WHERE id = ?", (project_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row["tokens_used"] if row else 0
 
     # --------------------------------------------------------
     # Artifacts

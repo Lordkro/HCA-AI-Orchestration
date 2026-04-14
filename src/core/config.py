@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     max_tasks_per_project: int = 50
     task_timeout_minutes: int = 30
     project_timeout_minutes: int = 480
+    project_token_budget: int = 500_000
+    activity_timeout_minutes: int = 60
+    max_parallel_tasks: int = 3
 
     # --- Logging ---
     log_level: str = "INFO"

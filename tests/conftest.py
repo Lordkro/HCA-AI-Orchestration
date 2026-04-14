@@ -172,6 +172,13 @@ class MockMessageBus:
     async def get_stream_length(self, stream: str) -> int:
         return 0
 
+    def get_stats(self) -> dict[str, Any]:
+        return {
+            "messages_published": len(self.published),
+            "messages_consumed": 0,
+            "connected": self._connected,
+        }
+
 
 @pytest.fixture
 def mock_bus() -> MockMessageBus:

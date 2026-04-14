@@ -89,3 +89,35 @@ async def get_project_artifacts(project_id: str, request: Request) -> list[dict]
     db = request.app.state.db
     artifacts = await db.list_artifacts(project_id)
     return [a.model_dump(mode="json") for a in artifacts]
+
+
+@router.post("/{project_id}/pause")
+async def pause_project(project_id: str, request: Request) -> dict:
+    """Pause an active project.  Agents will skip messages for paused projects."""
+    db = request.app.state.db
+    project = await db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.status != "active":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot pause project in '{project.status}' state",
+        )
+    await db.update_project(project_id, status="paused")
+    return {"project_id": project_id, "status": "paused"}
+
+
+@router.post("/{project_id}/resume")
+async def resume_project(project_id: str, request: Request) -> dict:
+    """Resume a paused project."""
+    db = request.app.state.db
+    project = await db.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.status != "paused":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot resume project in '{project.status}' state",
+        )
+    await db.update_project(project_id, status="active")
+    return {"project_id": project_id, "status": "active"}

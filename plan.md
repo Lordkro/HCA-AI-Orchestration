@@ -223,27 +223,36 @@
 ### Phase 3: Orchestration & Workflow Engine
 > Make the agents work together as a cohesive team.
 
-- [ ] **3.1 — Task state machine**
-  - Define task states: `pending → assigned → in_progress → review → approved/rejected → done`
-  - Implement state transitions with validation
-  - Add timeout and retry logic
+- [x] **3.1 — Task state machine** ✅
+  - Task states: `pending → assigned → in_progress → review → approved/rejected → done`
+  - Validated transitions with iteration counting
+  - Timeout and retry logic (task timeout auto-fails, FAILED → PENDING retry)
+  - Task dependencies (`depends_on` field — tasks wait for deps to reach DONE)
+  - Schema migration v3 for `depends_on` and `tokens_used` columns
 
-- [ ] **3.2 — Pipeline definitions**
-  - Define the standard workflow: `PM → Research → Spec → Code → Critic → (iterate) → Done`
-  - Support parallel task execution where possible
-  - Handle dependencies between tasks
+- [x] **3.2 — Pipeline definitions** ✅
+  - Standard workflow: `PM → Research → Spec → Code → Critic → (iterate) → Done`
+  - Dependency-aware parallel task execution (`get_assignable_tasks` respects deps)
+  - PM dispatches multiple independent tasks simultaneously
+  - Configurable `max_parallel_tasks` limit
+  - PM parses `DEPENDS_ON:` from LLM output, resolves titles → task IDs
 
-- [ ] **3.3 — Feedback loops**
-  - Critic → Coder iteration cycle (with max iteration cap)
-  - Critic → Spec revision cycle
-  - PM escalation on repeated failures
+- [x] **3.3 — Feedback loops** ✅
+  - Critic → Coder iteration cycle (with max iteration cap per task)
+  - Critic → Spec / Research revision cycle (routed via `artifact_type`)
+  - PM escalation on guardrail failure (STATUS_UPDATE message to PM on max iterations)
 
-- [ ] **3.4 — Guardrails & safety**
+- [x] **3.4 — Guardrails & safety** ✅
   - Maximum iterations per task (prevent infinite loops)
-  - Total project token budget tracking
-  - Deadlock detection
-  - Human override / pause mechanism
-  - Activity timeout detection
+  - Total project token budget tracking (per-task + per-project counters)
+  - Deadlock detection (all non-DONE tasks are FAILED or blocked on unmet deps)
+  - Human override / pause mechanism (project pause/resume via API; agents skip paused projects)
+  - Activity timeout detection (Pipeline fails project when no task updated for N minutes)
+  - Task timeout detection (Pipeline auto-fails timed-out tasks)
+  - Token budget enforcement (Pipeline fails project when budget exceeded)
+  - API: `POST /api/projects/{id}/pause`, `POST /api/projects/{id}/resume`
+  - API: `POST /api/tasks/detail/{id}/retry` (FAILED → PENDING)
+  - 38 new Phase 3 tests — total: 182 tests passing, 0 errors
 
 **Deliverable:** Agents autonomously execute a full project pipeline from idea to code with quality gates.
 

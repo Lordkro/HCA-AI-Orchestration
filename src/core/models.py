@@ -108,6 +108,7 @@ class Project(BaseModel):
     updated_at: datetime = Field(default_factory=_utc_now)
     status: str = "active"  # active, paused, completed, failed
     idea: str  # The original product idea from the user
+    tokens_used: int = 0
 
 
 class Task(BaseModel):
@@ -126,6 +127,8 @@ class Task(BaseModel):
     deliverable: str = ""
     feedback: str = ""
     priority: Priority = Priority.NORMAL
+    depends_on: list[str] = Field(default_factory=list)
+    tokens_used: int = 0
 
 
 class Artifact(BaseModel):

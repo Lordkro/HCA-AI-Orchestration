@@ -309,6 +309,16 @@ class BaseAgent(ABC):
         )
 
         try:
+            # Check if the project is paused — skip processing if so
+            project = await self.db.get_project(message.project_id)
+            if project and project.status == "paused":
+                logger.info(
+                    "message_skipped_project_paused",
+                    agent=self.role.value,
+                    project_id=message.project_id,
+                )
+                return
+
             # Persist for history
             await self.db.save_message(message.model_dump(mode="json"))
 
@@ -433,6 +443,17 @@ class BaseAgent(ABC):
         # Record in per-project history
         self._append_history(pid, "user", prompt)
         self._append_history(pid, "assistant", response)
+
+        # Track token usage at the project level (via TaskManager)
+        if self.task_manager and project_id:
+            from src.core.ollama_client import estimate_tokens
+            prompt_tokens = sum(estimate_tokens(m["content"]) for m in messages)
+            response_tokens = estimate_tokens(response)
+            total_tokens = prompt_tokens + response_tokens
+            try:
+                await self.task_manager.record_tokens(project_id, "", total_tokens)
+            except Exception:
+                pass  # Don't let token tracking break agent flow
 
         self.status = AgentStatus.IDLE
         return response

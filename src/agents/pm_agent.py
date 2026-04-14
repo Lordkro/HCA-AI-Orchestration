@@ -98,14 +98,22 @@ OUTPUT FORMAT — you MUST use this exact format for each task:
 TASK: <concise title>
 AGENT: <research|spec|coder|critic>
 PRIORITY: <low|normal|high|critical>
+DEPENDS_ON: <comma-separated titles of tasks this depends on, or "none">
 DESCRIPTION: <detailed description on one or more lines, until the next TASK: or end>
 
 Example:
 TASK: Investigate auth libraries
 AGENT: research
 PRIORITY: high
+DEPENDS_ON: none
 DESCRIPTION: Research the best authentication libraries for a Python REST API.
 Compare JWT, session-based, and OAuth2 approaches.
+
+TASK: Write API specification
+AGENT: spec
+PRIORITY: normal
+DEPENDS_ON: Investigate auth libraries
+DESCRIPTION: Based on the research results, write a detailed API specification.
 
 Important rules:
 - Start with research tasks, then specification, then coding tasks.
@@ -136,15 +144,18 @@ Think step by step about what needs to be built and in what order."""
                 ),
             ]
         elif self.task_manager:
+            # Two-pass creation: first create all tasks, then resolve deps
+            title_to_id: dict[str, str] = {}
             persisted: list[Task] = []
             for t in tasks:
                 try:
                     created = await self.task_manager.create_task(
                         project_id=project_id,
-                        title=t["title"],
-                        description=t["description"],
-                        assigned_to=AgentRole(t["agent"]),
+                        title=str(t["title"]),
+                        description=str(t["description"]),
+                        assigned_to=AgentRole(str(t["agent"])),
                     )
+                    title_to_id[str(t["title"]).lower()] = created.id
                     persisted.append(created)
                 except (ValueError, KeyError) as exc:
                     logger.warning(
@@ -152,6 +163,20 @@ Think step by step about what needs to be built and in what order."""
                         title=t.get("title", "?"),
                         reason=str(exc),
                     )
+
+            # Second pass: resolve depends_on titles → IDs
+            for task_dict, task_obj in zip(tasks, persisted):
+                dep_titles = task_dict.get("depends_on_titles", [])
+                if dep_titles and isinstance(dep_titles, list):
+                    dep_ids = []
+                    for dep_title in dep_titles:
+                        dep_id = title_to_id.get(dep_title.lower())
+                        if dep_id:
+                            dep_ids.append(dep_id)
+                    if dep_ids:
+                        task_obj.depends_on = dep_ids
+                        await self.db.update_task(task_obj)
+
             tasks = persisted  # type: ignore[assignment]
 
         # Kick off the first pending task
@@ -169,6 +194,9 @@ Think step by step about what needs to be built and in what order."""
     _PRIORITY_RE = re.compile(
         r"^PRIORITY:\s*(\w+)", re.IGNORECASE | re.MULTILINE
     )
+    _DEPENDS_ON_RE = re.compile(
+        r"^DEPENDS_ON:\s*(.+)$", re.IGNORECASE | re.MULTILINE
+    )
     _DESCRIPTION_RE = re.compile(
         r"^DESCRIPTION:\s*(.*)", re.IGNORECASE | re.MULTILINE | re.DOTALL
     )
@@ -177,15 +205,15 @@ Think step by step about what needs to be built and in what order."""
 
     def _parse_tasks(
         self, response: str, project_id: str
-    ) -> list[dict[str, str]]:
+    ) -> list[dict[str, str | list[str]]]:
         """Parse the LLM's structured output into task dicts.
 
-        Returns a list of ``{"title", "agent", "priority", "description"}``
-        dicts.  Skips malformed blocks.
+        Returns a list of ``{"title", "agent", "priority", "description",
+        "depends_on"}`` dicts.  Skips malformed blocks.
         """
         # Split the response on TASK: headers
         parts = re.split(r"(?=^TASK:)", response, flags=re.IGNORECASE | re.MULTILINE)
-        tasks: list[dict[str, str]] = []
+        tasks: list[dict[str, str | list[str]]] = []
 
         for part in parts:
             part = part.strip()
@@ -210,6 +238,16 @@ Think step by step about what needs to be built and in what order."""
             if priority not in {"low", "normal", "high", "critical"}:
                 priority = "normal"
 
+            # Optional DEPENDS_ON: comma-separated task titles
+            depends_on_m = self._DEPENDS_ON_RE.search(part)
+            depends_on_titles: list[str] = []
+            if depends_on_m:
+                raw = depends_on_m.group(1).strip()
+                if raw.lower() != "none":
+                    depends_on_titles = [
+                        t.strip() for t in raw.split(",") if t.strip()
+                    ]
+
             # Everything after DESCRIPTION: (up to the next TASK: which
             # we already split on)
             desc_m = self._DESCRIPTION_RE.search(part)
@@ -220,6 +258,7 @@ Think step by step about what needs to be built and in what order."""
                 "agent": agent,
                 "priority": priority,
                 "description": description,
+                "depends_on_titles": depends_on_titles,
             })
 
         logger.info(
@@ -363,18 +402,21 @@ Please provide a clear, decisive answer to help them proceed."""
     async def _assign_next_task(
         self, project_id: str
     ) -> AgentMessage | None:
-        """Find the next pending task and send a TASK_ASSIGNMENT message.
+        """Find assignable tasks and dispatch them.
 
-        Transitions the task ``PENDING → ASSIGNED`` before dispatching.
-        Returns ``None`` when there are no more pending tasks (project
-        may be complete).
+        Uses dependency-aware ordering via ``TaskManager.get_assignable_tasks``.
+        Can dispatch multiple independent tasks in parallel.
+
+        Returns the first assignment message (additional assignments are
+        published directly via ``self.send``).  Returns ``None`` when there
+        are no more assignable tasks.
         """
         if not self.task_manager:
             return None
 
-        pending = await self.db.list_tasks(project_id, state=TaskState.PENDING)
-        if not pending:
-            logger.info("pm_no_pending_tasks", project_id=project_id)
+        assignable = await self.task_manager.get_assignable_tasks(project_id)
+        if not assignable:
+            logger.info("pm_no_assignable_tasks", project_id=project_id)
 
             # Check if all tasks are done → mark project complete
             progress = await self.task_manager.get_project_progress(project_id)
@@ -384,21 +426,33 @@ Please provide a clear, decisive answer to help them proceed."""
 
             return None
 
-        task = pending[0]
-        assigned_to = task.assigned_to or AgentRole.RESEARCH
+        first_msg: AgentMessage | None = None
 
-        # Transition PENDING → ASSIGNED
-        await self._transition_task(task.id, TaskState.ASSIGNED)
+        for task in assignable:
+            assigned_to = task.assigned_to or AgentRole.RESEARCH
 
-        return self.create_message(
-            recipient=assigned_to,
-            msg_type=MessageType.TASK_ASSIGNMENT,
-            project_id=project_id,
-            task_id=task.id,
-            content=task.description,
-            priority=task.priority,
-            metadata={"task_title": task.title},
-        )
+            # Transition PENDING → ASSIGNED
+            await self._transition_task(task.id, TaskState.ASSIGNED)
+
+            msg = self.create_message(
+                recipient=assigned_to,
+                msg_type=MessageType.TASK_ASSIGNMENT,
+                project_id=project_id,
+                task_id=task.id,
+                content=task.description,
+                priority=task.priority,
+                metadata={"task_title": task.title},
+            )
+
+            if first_msg is None:
+                first_msg = msg
+            else:
+                # Publish additional parallel assignments directly
+                await self.bus.publish(msg)
+                await self.db.save_message(msg.model_dump(mode="json"))
+                self.stats.messages_sent += 1
+
+        return first_msg
 
     # ------------------------------------------------------------------
     # Pipeline Helpers
