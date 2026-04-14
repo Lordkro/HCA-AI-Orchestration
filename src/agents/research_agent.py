@@ -11,6 +11,7 @@ from src.core.models import (
     AgentMessage,
     AgentRole,
     MessageType,
+    TaskState,
 )
 from src.core.ollama_client import OllamaClient
 
@@ -33,8 +34,9 @@ class ResearchAgent(BaseAgent):
         bus: MessageBus,
         ollama: OllamaClient,
         db: Database,
+        task_manager: object | None = None,
     ) -> None:
-        super().__init__(role=AgentRole.RESEARCH, bus=bus, ollama=ollama, db=db)
+        super().__init__(role=AgentRole.RESEARCH, bus=bus, ollama=ollama, db=db, task_manager=task_manager)
 
     async def process_message(self, message: AgentMessage) -> AgentMessage | None:
         """Handle incoming messages."""
@@ -51,6 +53,9 @@ class ResearchAgent(BaseAgent):
 
     async def _handle_research_task(self, message: AgentMessage) -> AgentMessage | None:
         """Conduct research based on the assigned task."""
+        # Transition task: ASSIGNED → IN_PROGRESS
+        await self._transition_task(message.task_id, TaskState.IN_PROGRESS)
+
         prompt = f"""You have been assigned a research task by the Project Manager.
 
 TASK/CONTEXT:

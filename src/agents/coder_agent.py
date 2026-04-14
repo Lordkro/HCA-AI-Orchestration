@@ -16,6 +16,7 @@ from src.core.models import (
     AgentRole,
     Artifact,
     MessageType,
+    TaskState,
 )
 from src.core.ollama_client import OllamaClient
 
@@ -38,8 +39,9 @@ class CoderAgent(BaseAgent):
         bus: MessageBus,
         ollama: OllamaClient,
         db: Database,
+        task_manager: object | None = None,
     ) -> None:
-        super().__init__(role=AgentRole.CODER, bus=bus, ollama=ollama, db=db)
+        super().__init__(role=AgentRole.CODER, bus=bus, ollama=ollama, db=db, task_manager=task_manager)
 
     async def process_message(self, message: AgentMessage) -> AgentMessage | None:
         """Handle incoming messages."""
@@ -56,6 +58,9 @@ class CoderAgent(BaseAgent):
 
     async def _handle_coding_task(self, message: AgentMessage) -> AgentMessage | None:
         """Generate code based on the specification."""
+        # Transition task: ASSIGNED → IN_PROGRESS
+        await self._transition_task(message.task_id, TaskState.IN_PROGRESS)
+
         prompt = f"""You have been assigned a coding task. Implement the following based on the specification provided.
 
 SPECIFICATION / INSTRUCTIONS:

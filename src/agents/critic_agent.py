@@ -11,6 +11,7 @@ from src.core.models import (
     AgentMessage,
     AgentRole,
     MessageType,
+    TaskState,
 )
 from src.core.ollama_client import OllamaClient
 
@@ -33,8 +34,9 @@ class CriticAgent(BaseAgent):
         bus: MessageBus,
         ollama: OllamaClient,
         db: Database,
+        task_manager: object | None = None,
     ) -> None:
-        super().__init__(role=AgentRole.CRITIC, bus=bus, ollama=ollama, db=db)
+        super().__init__(role=AgentRole.CRITIC, bus=bus, ollama=ollama, db=db, task_manager=task_manager)
 
     async def process_message(self, message: AgentMessage) -> AgentMessage | None:
         """Handle incoming messages."""
@@ -49,7 +51,10 @@ class CriticAgent(BaseAgent):
 
     async def _handle_review_task(self, message: AgentMessage) -> AgentMessage | None:
         """Review a deliverable (code, spec, or research)."""
-        artifact_type = message.payload.metadata.get("artifact_type", "unknown")
+        # Preserve the original artifact_type so the PM can route feedback
+        # back to the correct agent if revision is needed.
+        original_artifact_type = message.payload.metadata.get("artifact_type", "unknown")
+        artifact_type = original_artifact_type
 
         prompt = f"""You are reviewing a deliverable from the {message.sender.value} agent.
 
@@ -107,7 +112,10 @@ Be constructive but thorough. Do not approve work that has critical or major iss
                 project_id=message.project_id,
                 task_id=message.task_id,
                 content=response,
-                metadata={"review_result": "approved", "artifact_type": "review"},
+                metadata={
+                    "review_result": "approved",
+                    "artifact_type": original_artifact_type,
+                },
             )
         else:
             return self.create_message(
@@ -116,7 +124,10 @@ Be constructive but thorough. Do not approve work that has critical or major iss
                 project_id=message.project_id,
                 task_id=message.task_id,
                 content=response,
-                metadata={"review_result": "needs_revision", "artifact_type": "review"},
+                metadata={
+                    "review_result": "needs_revision",
+                    "artifact_type": original_artifact_type,
+                },
             )
 
     async def _handle_question(self, message: AgentMessage) -> AgentMessage | None:

@@ -1,6 +1,15 @@
-"""Project Manager Agent — orchestrates the AI development team."""
+"""Project Manager Agent — orchestrates the AI development team.
+
+Phase 2 responsibilities:
+- Parse LLM project plans into persisted Task records
+- Drive tasks through the state machine (assign → in_progress → review → done)
+- Route Critic feedback to the correct agent for revision
+- Kick off the next pending task when one completes
+"""
 
 from __future__ import annotations
+
+import re
 
 import structlog
 
@@ -36,8 +45,9 @@ class PMAgent(BaseAgent):
         bus: MessageBus,
         ollama: OllamaClient,
         db: Database,
+        task_manager: object | None = None,
     ) -> None:
-        super().__init__(role=AgentRole.PM, bus=bus, ollama=ollama, db=db)
+        super().__init__(role=AgentRole.PM, bus=bus, ollama=ollama, db=db, task_manager=task_manager)
 
     async def process_message(self, message: AgentMessage) -> AgentMessage | None:
         """Handle incoming messages based on type."""
@@ -65,8 +75,12 @@ class PMAgent(BaseAgent):
         """Break down a new product idea into a project plan.
 
         The project has already been created by the API route and its ID
-        is carried in ``message.project_id``.  The PM agent's job is to
-        decompose the idea into a plan and kick off the pipeline.
+        is carried in ``message.project_id``.  The PM:
+
+        1. Asks the LLM to decompose the idea into structured tasks.
+        2. Parses the LLM output into ``Task`` records and persists them
+           via ``TaskManager``.
+        3. Assigns the first pending task to kick off the pipeline.
         """
         idea = message.payload.content
         project_id = message.project_id
@@ -77,67 +91,177 @@ class PMAgent(BaseAgent):
 PRODUCT IDEA:
 {idea}
 
-Please analyze this idea and create a detailed project plan. Break it down into specific, actionable tasks that our team can execute. For each task, specify:
+Please analyze this idea and create a detailed project plan.
 
-1. Task title (concise)
-2. Task description (detailed enough for the assigned agent to work independently)
-3. Which agent should handle it: research, spec, coder, or critic
-4. Dependencies (which tasks must complete first)
-5. Priority: low, normal, high, or critical
+OUTPUT FORMAT — you MUST use this exact format for each task:
 
-Output your plan as a structured list. Start with research tasks, then specification tasks, then coding tasks. The critic will review deliverables automatically.
+TASK: <concise title>
+AGENT: <research|spec|coder|critic>
+PRIORITY: <low|normal|high|critical>
+DESCRIPTION: <detailed description on one or more lines, until the next TASK: or end>
 
-Remember our team:
-- Research Agent: investigates technologies, patterns, feasibility
-- Spec Agent: writes detailed technical specifications, API contracts, data models
-- Coder Agent: implements the code based on specifications
-- Critic Agent: reviews all outputs for quality
+Example:
+TASK: Investigate auth libraries
+AGENT: research
+PRIORITY: high
+DESCRIPTION: Research the best authentication libraries for a Python REST API.
+Compare JWT, session-based, and OAuth2 approaches.
+
+Important rules:
+- Start with research tasks, then specification, then coding tasks.
+- The critic will review deliverables automatically — you do NOT need to create critic tasks.
+- Each task must be self-contained and detailed enough for the assigned agent.
+- Order tasks by dependency (earlier tasks should be done first).
+- Typically a project needs 1–3 research tasks, 1–2 spec tasks, and 1–3 coding tasks.
 
 Think step by step about what needs to be built and in what order."""
 
         response = await self.think(prompt, project_id=project_id)
 
-        # Send the plan to the research agent to begin
-        return self.create_message(
-            recipient=AgentRole.RESEARCH,
-            msg_type=MessageType.TASK_ASSIGNMENT,
+        # Parse the LLM output into Task records
+        tasks = self._parse_tasks(response, project_id)
+
+        if not tasks and self.task_manager:
+            # Fallback: create a single research task from the raw plan
+            logger.warning(
+                "pm_task_parse_fallback",
+                project_id=project_id,
+            )
+            tasks = [
+                await self.task_manager.create_task(
+                    project_id=project_id,
+                    title="Research and plan",
+                    description=f"Research the following idea and produce a report:\n\n{idea}",
+                    assigned_to=AgentRole.RESEARCH,
+                ),
+            ]
+        elif self.task_manager:
+            persisted: list[Task] = []
+            for t in tasks:
+                try:
+                    created = await self.task_manager.create_task(
+                        project_id=project_id,
+                        title=t["title"],
+                        description=t["description"],
+                        assigned_to=AgentRole(t["agent"]),
+                    )
+                    persisted.append(created)
+                except (ValueError, KeyError) as exc:
+                    logger.warning(
+                        "pm_task_create_skipped",
+                        title=t.get("title", "?"),
+                        reason=str(exc),
+                    )
+            tasks = persisted  # type: ignore[assignment]
+
+        # Kick off the first pending task
+        return await self._assign_next_task(project_id)
+
+    # ------------------------------------------------------------------
+    # Task Parsing
+    # ------------------------------------------------------------------
+
+    # Regex for the structured TASK: blocks from the LLM
+    _TASK_HEADER_RE = re.compile(
+        r"^TASK:\s*(.+)$", re.IGNORECASE | re.MULTILINE
+    )
+    _AGENT_RE = re.compile(r"^AGENT:\s*(\w+)", re.IGNORECASE | re.MULTILINE)
+    _PRIORITY_RE = re.compile(
+        r"^PRIORITY:\s*(\w+)", re.IGNORECASE | re.MULTILINE
+    )
+    _DESCRIPTION_RE = re.compile(
+        r"^DESCRIPTION:\s*(.*)", re.IGNORECASE | re.MULTILINE | re.DOTALL
+    )
+
+    _VALID_AGENTS = {"research", "spec", "coder"}
+
+    def _parse_tasks(
+        self, response: str, project_id: str
+    ) -> list[dict[str, str]]:
+        """Parse the LLM's structured output into task dicts.
+
+        Returns a list of ``{"title", "agent", "priority", "description"}``
+        dicts.  Skips malformed blocks.
+        """
+        # Split the response on TASK: headers
+        parts = re.split(r"(?=^TASK:)", response, flags=re.IGNORECASE | re.MULTILINE)
+        tasks: list[dict[str, str]] = []
+
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+
+            title_m = self._TASK_HEADER_RE.search(part)
+            agent_m = self._AGENT_RE.search(part)
+            if not title_m or not agent_m:
+                continue
+
+            agent = agent_m.group(1).strip().lower()
+            if agent not in self._VALID_AGENTS:
+                continue
+
+            priority_m = self._PRIORITY_RE.search(part)
+            priority = (
+                priority_m.group(1).strip().lower()
+                if priority_m
+                else "normal"
+            )
+            if priority not in {"low", "normal", "high", "critical"}:
+                priority = "normal"
+
+            # Everything after DESCRIPTION: (up to the next TASK: which
+            # we already split on)
+            desc_m = self._DESCRIPTION_RE.search(part)
+            description = desc_m.group(1).strip() if desc_m else title_m.group(1).strip()
+
+            tasks.append({
+                "title": title_m.group(1).strip(),
+                "agent": agent,
+                "priority": priority,
+                "description": description,
+            })
+
+        logger.info(
+            "pm_tasks_parsed",
             project_id=project_id,
-            content=response,
-            priority=Priority.HIGH,
-            metadata={"original_idea": idea},
+            count=len(tasks),
         )
+        return tasks
 
     async def _handle_deliverable(self, message: AgentMessage) -> AgentMessage | None:
         """Handle a completed deliverable from an agent.
 
-        Uses metadata from the Critic to decide whether to approve or
-        route back for revision.  For other agents the standard pipeline
-        order is followed: Research → Spec → Coder → Critic.
+        State machine transitions:
+        - Critic approved  → REVIEW → APPROVED → DONE, then assign next task
+        - Critic rejected  → REVIEW → REVISION, then route feedback
+        - Other agents     → advance via standard pipeline
         """
         review_result = message.payload.metadata.get("review_result", "")
+        task_id = message.task_id
 
-        # --- Critic approved → mark done / advance ---
+        # --- Critic approved → close the task and start the next one ---
         if message.sender == AgentRole.CRITIC and review_result == "approved":
             logger.info(
                 "pm_deliverable_approved",
                 project_id=message.project_id,
-                task_id=message.task_id,
+                task_id=task_id,
             )
-            # Notify all agents that the task is complete
-            return self.create_message(
-                recipient=AgentRole.RESEARCH,
-                msg_type=MessageType.STATUS_UPDATE,
-                project_id=message.project_id,
-                task_id=message.task_id,
-                content=f"Task approved by Critic. Output:\n\n{message.payload.content}",
-                metadata={"status": "approved"},
-            )
+            # REVIEW → APPROVED → DONE
+            await self._transition_task(task_id, TaskState.APPROVED)
+            await self._transition_task(task_id, TaskState.DONE)
 
-        # --- Critic rejected → route feedback to the appropriate agent ---
+            # Kick off the next pending task for this project
+            return await self._assign_next_task(message.project_id)
+
+        # --- Critic rejected → revision cycle ---
         if message.sender == AgentRole.CRITIC and review_result == "needs_revision":
             return await self._handle_feedback(message)
 
         # --- Standard pipeline progression (non-critic deliverables) ---
+        # The agent just submitted work → transition to REVIEW
+        await self._transition_task(task_id, TaskState.REVIEW)
+
         next_agent = self._determine_next_agent(message.sender)
         if next_agent is None:
             return None
@@ -153,15 +277,13 @@ who will work on this next.  Be concise."""
 
         response = await self.think(prompt, project_id=message.project_id)
 
-        # Choose the right message type for the next hop
-        msg_type = MessageType.TASK_ASSIGNMENT
-
         return self.create_message(
             recipient=next_agent,
-            msg_type=msg_type,
+            msg_type=MessageType.TASK_ASSIGNMENT,
             project_id=message.project_id,
-            task_id=message.task_id,
+            task_id=task_id,
             content=f"{response}\n\n--- PREVIOUS DELIVERABLE ---\n{message.payload.content}",
+            metadata=message.payload.metadata,
         )
 
     async def _handle_status_update(self, message: AgentMessage) -> AgentMessage | None:
@@ -178,8 +300,13 @@ who will work on this next.  Be concise."""
 
         Determines which agent should receive the revision request based on
         the artifact type in the metadata.  Falls back to CODER if unknown.
+        Also transitions the task to REVISION if it's currently in REVIEW.
         """
         artifact_type = message.payload.metadata.get("artifact_type", "")
+        task_id = message.task_id
+
+        # Transition task to REVISION (safe — returns False if invalid)
+        await self._transition_task(task_id, TaskState.REVISION)
 
         # Determine who should address the feedback
         revision_target = self._feedback_target(artifact_type, message.sender)
@@ -228,6 +355,54 @@ Please provide a clear, decisive answer to help them proceed."""
             task_id=message.task_id,
             content=response,
         )
+
+    # ------------------------------------------------------------------
+    # Task Assignment
+    # ------------------------------------------------------------------
+
+    async def _assign_next_task(
+        self, project_id: str
+    ) -> AgentMessage | None:
+        """Find the next pending task and send a TASK_ASSIGNMENT message.
+
+        Transitions the task ``PENDING → ASSIGNED`` before dispatching.
+        Returns ``None`` when there are no more pending tasks (project
+        may be complete).
+        """
+        if not self.task_manager:
+            return None
+
+        pending = await self.db.list_tasks(project_id, state=TaskState.PENDING)
+        if not pending:
+            logger.info("pm_no_pending_tasks", project_id=project_id)
+
+            # Check if all tasks are done → mark project complete
+            progress = await self.task_manager.get_project_progress(project_id)
+            if progress["total_tasks"] > 0 and progress["completed"] == progress["total_tasks"]:
+                await self.db.update_project(project_id, status="completed")
+                logger.info("pm_project_completed", project_id=project_id)
+
+            return None
+
+        task = pending[0]
+        assigned_to = task.assigned_to or AgentRole.RESEARCH
+
+        # Transition PENDING → ASSIGNED
+        await self._transition_task(task.id, TaskState.ASSIGNED)
+
+        return self.create_message(
+            recipient=assigned_to,
+            msg_type=MessageType.TASK_ASSIGNMENT,
+            project_id=project_id,
+            task_id=task.id,
+            content=task.description,
+            priority=task.priority,
+            metadata={"task_title": task.title},
+        )
+
+    # ------------------------------------------------------------------
+    # Pipeline Helpers
+    # ------------------------------------------------------------------
 
     def _determine_next_agent(self, current: AgentRole) -> AgentRole | None:
         """Determine the next agent in the pipeline."""

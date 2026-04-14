@@ -32,8 +32,15 @@ from src.core.models import (
     MessagePayload,
     MessageType,
     Priority,
+    TaskState,
 )
 from src.core.ollama_client import OllamaClient
+
+# Avoid circular import — TaskManager is optional and injected at runtime.
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.orchestrator.task_manager import TaskManager
 
 logger = structlog.get_logger()
 
@@ -112,11 +119,13 @@ class BaseAgent(ABC):
         bus: MessageBus,
         ollama: OllamaClient,
         db: Database,
+        task_manager: TaskManager | None = None,
     ) -> None:
         self.role = role
         self.bus = bus
         self.ollama = ollama
         self.db = db
+        self.task_manager = task_manager
         self.status = AgentStatus.STOPPED
         self.stats = AgentStats()
 
@@ -431,6 +440,30 @@ class BaseAgent(ABC):
     # --------------------------------------------------------
     # Message Sending Helpers
     # --------------------------------------------------------
+
+    async def _transition_task(
+        self, task_id: str, new_state: TaskState
+    ) -> bool:
+        """Attempt a task state transition via the TaskManager.
+
+        Returns True on success, False if no TaskManager is set or the
+        transition is invalid.  Logs warnings on failure rather than
+        raising, because a failed transition should not crash an agent.
+        """
+        if not self.task_manager or not task_id:
+            return False
+        try:
+            await self.task_manager.transition(task_id, new_state)
+            return True
+        except ValueError as exc:
+            logger.warning(
+                "agent_transition_failed",
+                agent=self.role.value,
+                task_id=task_id,
+                target_state=new_state.value,
+                reason=str(exc),
+            )
+            return False
 
     def create_message(
         self,

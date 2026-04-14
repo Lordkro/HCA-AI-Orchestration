@@ -58,18 +58,18 @@ async def main() -> None:
     logger.info("Ollama connected, preloading default model...")
     await ollama.preload_model()
 
-    # Initialize agents
-    agents = [
-        PMAgent(bus=bus, ollama=ollama, db=db),
-        ResearchAgent(bus=bus, ollama=ollama, db=db),
-        SpecAgent(bus=bus, ollama=ollama, db=db),
-        CoderAgent(bus=bus, ollama=ollama, db=db),
-        CriticAgent(bus=bus, ollama=ollama, db=db),
-    ]
-
     # Initialize orchestration
     task_manager = TaskManager(db=db, bus=bus)
     pipeline = Pipeline(task_manager=task_manager, bus=bus)
+
+    # Initialize agents (with TaskManager injected)
+    agents = [
+        PMAgent(bus=bus, ollama=ollama, db=db, task_manager=task_manager),
+        ResearchAgent(bus=bus, ollama=ollama, db=db, task_manager=task_manager),
+        SpecAgent(bus=bus, ollama=ollama, db=db, task_manager=task_manager),
+        CoderAgent(bus=bus, ollama=ollama, db=db, task_manager=task_manager),
+        CriticAgent(bus=bus, ollama=ollama, db=db, task_manager=task_manager),
+    ]
 
     # Start the web API
     app = create_app(db=db, bus=bus, task_manager=task_manager, agents=agents)

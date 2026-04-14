@@ -171,39 +171,52 @@
 ### Phase 2: Agent Implementation
 > Build out each agent with its specific behavior and prompts.
 
-- [ ] **2.1 — Project Manager Agent**
+- [x] **2.1 — Project Manager Agent** ✅
   - System prompt engineering for PM role
-  - Project decomposition logic (idea → milestones → tasks)
-  - Task assignment and routing
-  - Progress tracking and decision-making
+  - Project decomposition logic (idea → structured TASK: blocks → persisted Task records)
+  - Task assignment and routing (auto-assigns first pending task)
+  - Progress tracking and decision-making (project auto-completes when all tasks done)
   - Pipeline orchestration (who works when)
+  - State machine integration (REVIEW → APPROVED → DONE on approval, REVIEW → REVISION on rejection)
+  - Structured task parsing with regex (`_parse_tasks()`) and fallback for unparseable LLM output
 
-- [ ] **2.2 — Research Agent**
+- [x] **2.2 — Research Agent** ✅
   - System prompt for research/analysis role
   - Structured output for research reports
-  - Ability to reference previous findings
+  - Ability to reference previous findings (per-project conversation memory)
   - Knowledge synthesis across multiple queries
+  - Task state transitions (ASSIGNED → IN_PROGRESS on pickup)
 
-- [ ] **2.3 — Specification Agent**
+- [x] **2.3 — Specification Agent** ✅
   - System prompt for technical specification writing
   - Template-based spec generation
   - Schema/API definition output formatting
   - Spec versioning on feedback
+  - Task state transitions (ASSIGNED → IN_PROGRESS on pickup)
 
-- [ ] **2.4 — Coder Agent**
+- [x] **2.4 — Coder Agent** ✅
   - System prompt for code generation
   - File creation and management in shared workspace
-  - Multi-file project generation
+  - Multi-file project generation (regex-based file parser)
   - Test generation alongside code
   - Iterative fixing based on Critic feedback
+  - Task state transitions (ASSIGNED → IN_PROGRESS on pickup)
 
-- [ ] **2.5 — Critic Agent**
+- [x] **2.5 — Critic Agent** ✅
   - System prompt for code/spec review
-  - Structured review output (issues, severity, suggestions)
-  - Approval/rejection decision logic
-  - Quality scoring system
+  - Structured review output (APPROVED / NEEDS REVISION)
+  - Approval/rejection decision logic (string matching on LLM output)
+  - Original artifact_type forwarding (enables PM to route feedback correctly)
 
-**Deliverable:** All five agents can participate in a full product development cycle via message passing.
+- [x] **2.6 — Agent ↔ TaskManager Integration** ✅
+  - BaseAgent gains optional `task_manager` dependency injection
+  - `_transition_task()` helper: safe state transitions (logs warnings, never crashes agent)
+  - All concrete agents accept `task_manager` kwarg and forward to BaseAgent
+  - `main.py` wires TaskManager into all agents
+  - 21 new Phase 2 tests (task parsing, state transitions, metadata forwarding, project completion)
+  - Total: 144 tests passing, 0 errors
+
+**Deliverable:** All five agents participate in a full product development cycle via message passing, with persisted Task records driven through the complete state machine.
 
 ---
 
