@@ -342,7 +342,15 @@
   - Agent prompt cookbook
   - Contributing guide
 
-**Deliverable:** Production-quality system with good error handling, observability, and docs.
+- [ ] **6.5 — Structured tool calling for agents**
+  - Replace regex-based file parsing with Ollama tool/function calls
+  - Define structured tools: `write_file(path, content)`, `read_file(path)`, `list_files(dir)`, `run_command(cmd)`
+  - Sandboxed code execution (run generated code in isolated Docker containers to verify it works)
+  - File diffing on revisions (apply diffs instead of rewriting entire files)
+  - Git integration per project (auto-commit each iteration to a project-specific repo)
+  - Tool call validation and error handling (malformed calls, missing args, permission checks)
+
+**Deliverable:** Production-quality system with good error handling, observability, structured tool use, and docs.
 
 ---
 
@@ -539,7 +547,3 @@ Phase 6  ░░░░░░░░░░░░░░░░░░░░░░░�
 ```
 
 ---
-
-## Next Step
-
-**Begin Phase 1.1** — Scaffold the project directory, create `pyproject.toml`, `docker-compose.yml`, `.env.example`, and all empty module files so we have the skeleton ready.
