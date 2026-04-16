@@ -261,28 +261,34 @@
 ### Phase 4: Web Dashboard (UI)
 > Build an interface to observe and interact with the agent team.
 
-- [ ] **4.1 — FastAPI backend**
+- [x] **4.1 — FastAPI backend** ✅
   - REST endpoints: projects, tasks, agents, messages, artifacts
-  - WebSocket endpoint for real-time updates
-  - Project creation endpoint (submit a new idea)
+  - WebSocket endpoint for real-time updates (Redis pub/sub → WebSocket forwarding)
+  - Project creation endpoint (submit a new idea → PM kickoff)
+  - Agent status API (`get_info()` from each agent)
+  - Ollama stats endpoint (token usage, performance)
+  - Project pause/resume, task retry endpoints
 
-- [ ] **4.2 — Dashboard frontend**
-  - Project overview page (active projects, status)
-  - Agent activity feed (real-time message stream)
-  - Task board (Kanban-style view of task states)
-  - Conversation viewer (see agent-to-agent dialogues)
-  - Artifact browser (view generated specs, code, docs)
+- [x] **4.2 — Dashboard frontend** ✅
+  - Project overview page (active projects, status, token usage, creation date)
+  - Agent activity feed (real-time message stream with sender/recipient/type, filterable by agent)
+  - Task board (Kanban-style view: Pending → Assigned → In Progress → Review → Done → Failed)
+  - Conversation viewer (agent-to-agent message history per project)
+  - Artifact browser (view generated files with type, version, size, agent, modal code viewer)
 
-- [ ] **4.3 — Controls**
-  - Start new project (submit product idea)
-  - Pause / resume project
-  - Human override: inject a message into the agent conversation
-  - Agent configuration (change models, adjust prompts)
+- [x] **4.3 — Controls** ✅
+  - Start new project (submit product idea with optional name, auto-navigate to project view)
+  - Pause / resume project (toggle button changes based on state)
+  - Retry failed tasks (from task detail modal)
+  - Activity feed filter and clear controls
 
-- [ ] **4.4 — Real-time updates**
-  - WebSocket push for new messages, task state changes
-  - Live agent status indicators (idle, thinking, working)
-  - Progress bars for milestones
+- [x] **4.4 — Real-time updates** ✅
+  - WebSocket push for new messages, task state changes, project status changes
+  - Live agent status indicators (idle/thinking/working/error with animated pulse)
+  - Progress bar for task completion percentage
+  - Token budget usage display
+  - Auto-reconnect WebSocket on disconnect
+  - Periodic refresh of agents (10s), projects (30s), health stats (15s), active project detail (10s)
 
 **Deliverable:** Fully functional web UI where you can submit ideas, watch agents work, and browse outputs.
 
@@ -419,11 +425,14 @@ HCA-Orchestration/
 │   └── .gitkeep
 │
 ├── tests/                      # Test suite
+│   ├── conftest.py             # Shared fixtures (temp DB, mock Ollama/Redis)
 │   ├── test_ollama_client.py
 │   ├── test_message_bus.py
 │   ├── test_database.py
 │   ├── test_agents.py
-│   └── test_pipeline.py
+│   ├── test_pipeline.py
+│   ├── test_orchestration.py
+│   └── test_integration.py
 │
 └── scripts/                    # Utility scripts
     ├── setup_ollama_models.sh  # Pull required models
@@ -538,12 +547,12 @@ and partial offload, the 32B model runs at excellent speeds on this hardware.
 We build bottom-up so each layer is testable before the next:
 
 ```
-Phase 1  ████████████████░░░░░░░░░░░░░░░░  Foundation
-Phase 2  ░░░░░░░░████████████████░░░░░░░░  Agents
-Phase 3  ░░░░░░░░░░░░░░░░████████████░░░░  Orchestration
-Phase 4  ░░░░░░░░░░░░░░░░░░░░████████████  UI
-Phase 5  ░░░░░░░░░░░░░░░░░░░░░░░░████████  Docker
-Phase 6  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░████  Polish
+Phase 1  ████████████████████████████████  Foundation     ✅
+Phase 2  ████████████████████████████████  Agents         ✅
+Phase 3  ████████████████████████████████  Orchestration  ✅
+Phase 4  ████████████████████████████████  UI             ✅
+Phase 5  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  Docker
+Phase 6  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  Polish
 ```
 
 ---

@@ -8,53 +8,202 @@
 </head>
 <body>
     <header>
-        <div class="header-content">
+        <div class="header-left">
             <h1>🧠 HCA Orchestration</h1>
-            <p class="subtitle">Hybrid Cognitive Architecture — Autonomous AI Development Team</p>
+            <p class="subtitle">Autonomous AI Development Team</p>
         </div>
-        <div class="connection-status" id="connectionStatus">
-            <span class="status-dot disconnected"></span>
-            <span>Disconnected</span>
+        <div class="header-right">
+            <div class="health-stats" id="healthStats"></div>
+            <div class="connection-status" id="connectionStatus">
+                <span class="status-dot disconnected"></span>
+                <span>Disconnected</span>
+            </div>
         </div>
     </header>
 
-    <main>
-        <!-- New Project Panel -->
-        <section class="panel new-project-panel">
-            <h2>🚀 New Project</h2>
-            <textarea id="ideaInput" placeholder="Describe your product idea here... Be as detailed as you like. The PM agent will break it down into tasks and coordinate the team."></textarea>
-            <div class="input-row">
-                <input type="text" id="projectName" placeholder="Project name (optional)">
-                <button id="submitIdea" onclick="submitIdea()">Submit to Team</button>
-            </div>
-        </section>
+    <!-- Navigation tabs -->
+    <nav class="tab-bar">
+        <button class="tab active" data-view="dashboard" onclick="switchView('dashboard')">📊 Dashboard</button>
+        <button class="tab" data-view="project" onclick="switchView('project')" id="tabProject" style="display:none">
+            📁 <span id="tabProjectLabel">Project</span>
+        </button>
+    </nav>
 
-        <div class="dashboard-grid">
-            <!-- Agent Status Panel -->
-            <section class="panel agent-panel">
-                <h2>🤖 Agent Status</h2>
-                <div id="agentList" class="agent-list">
-                    <p class="loading">Loading agents...</p>
+    <main>
+        <!-- ============================================================ -->
+        <!-- DASHBOARD VIEW                                               -->
+        <!-- ============================================================ -->
+        <div id="viewDashboard" class="view active">
+
+            <!-- New Project Panel -->
+            <section class="panel new-project-panel">
+                <h2>🚀 New Project</h2>
+                <textarea id="ideaInput" placeholder="Describe your product idea here... Be as detailed as you like.&#10;The PM agent will break it down into tasks and coordinate the team."></textarea>
+                <div class="input-row">
+                    <input type="text" id="projectName" placeholder="Project name (optional)">
+                    <button id="submitIdea" onclick="submitIdea()">Submit to Team</button>
                 </div>
             </section>
 
-            <!-- Activity Feed -->
-            <section class="panel activity-panel">
-                <h2>💬 Agent Activity</h2>
-                <div id="activityFeed" class="activity-feed">
-                    <p class="empty-state">Waiting for activity...</p>
+            <div class="dashboard-grid">
+                <!-- Agent Status Panel -->
+                <section class="panel agent-panel">
+                    <div class="panel-header-row">
+                        <h2>🤖 Agents</h2>
+                        <button class="btn-sm" onclick="loadAgents()">↻</button>
+                    </div>
+                    <div id="agentList" class="agent-list">
+                        <p class="loading">Loading agents...</p>
+                    </div>
+                </section>
+
+                <!-- Activity Feed -->
+                <section class="panel activity-panel">
+                    <div class="panel-header-row">
+                        <h2>💬 Activity Feed</h2>
+                        <div class="feed-controls">
+                            <select id="feedFilter" onchange="filterFeed()">
+                                <option value="all">All</option>
+                                <option value="pm">📋 PM</option>
+                                <option value="research">🔍 Research</option>
+                                <option value="spec">📐 Spec</option>
+                                <option value="coder">💻 Coder</option>
+                                <option value="critic">🔎 Critic</option>
+                                <option value="user">👤 User</option>
+                            </select>
+                            <button class="btn-sm" onclick="clearFeed()">Clear</button>
+                        </div>
+                    </div>
+                    <div id="activityFeed" class="activity-feed">
+                        <p class="empty-state">Waiting for activity...</p>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Projects List -->
+            <section class="panel projects-panel">
+                <div class="panel-header-row">
+                    <h2>📁 Projects</h2>
+                    <button class="btn-sm" onclick="loadProjects()">↻</button>
+                </div>
+                <div id="projectsList" class="projects-list">
+                    <p class="loading">Loading projects...</p>
                 </div>
             </section>
         </div>
 
-        <!-- Projects List -->
-        <section class="panel projects-panel">
-            <h2>📁 Projects</h2>
-            <div id="projectsList" class="projects-list">
-                <p class="loading">Loading projects...</p>
+        <!-- ============================================================ -->
+        <!-- PROJECT DETAIL VIEW                                          -->
+        <!-- ============================================================ -->
+        <div id="viewProject" class="view">
+
+            <!-- Project Header -->
+            <section class="panel project-header-panel">
+                <div class="project-detail-header">
+                    <div class="project-detail-info">
+                        <button class="btn-back" onclick="switchView('dashboard')">← Back</button>
+                        <h2 id="projectDetailName">Project</h2>
+                        <p id="projectDetailIdea" class="project-idea-text"></p>
+                    </div>
+                    <div class="project-controls">
+                        <span class="project-status-badge" id="projectDetailStatus">active</span>
+                        <button class="btn-sm btn-warning" id="btnPause" onclick="togglePause()">⏸ Pause</button>
+                    </div>
+                </div>
+
+                <!-- Progress bar -->
+                <div class="progress-section">
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" id="projectProgressBar" style="width:0%"></div>
+                    </div>
+                    <div class="progress-stats" id="projectProgressStats"></div>
+                </div>
+
+                <!-- Token budget -->
+                <div class="token-budget" id="tokenBudget"></div>
+            </section>
+
+            <!-- Sub-navigation -->
+            <nav class="sub-tab-bar">
+                <button class="sub-tab active" data-subtab="tasks" onclick="switchSubTab('tasks')">📋 Tasks</button>
+                <button class="sub-tab" data-subtab="messages" onclick="switchSubTab('messages')">💬 Messages</button>
+                <button class="sub-tab" data-subtab="artifacts" onclick="switchSubTab('artifacts')">📦 Artifacts</button>
+            </nav>
+
+            <!-- TASKS (Kanban board) -->
+            <div id="subtabTasks" class="subtab-content active">
+                <div class="kanban-board" id="kanbanBoard">
+                    <div class="kanban-column" data-state="pending">
+                        <h3>📥 Pending <span class="kanban-count" id="countPending">0</span></h3>
+                        <div class="kanban-cards" id="kanbanPending"></div>
+                    </div>
+                    <div class="kanban-column" data-state="assigned">
+                        <h3>📌 Assigned <span class="kanban-count" id="countAssigned">0</span></h3>
+                        <div class="kanban-cards" id="kanbanAssigned"></div>
+                    </div>
+                    <div class="kanban-column" data-state="in_progress">
+                        <h3>🔨 In Progress <span class="kanban-count" id="countInProgress">0</span></h3>
+                        <div class="kanban-cards" id="kanbanInProgress"></div>
+                    </div>
+                    <div class="kanban-column" data-state="review">
+                        <h3>🔍 Review <span class="kanban-count" id="countReview">0</span></h3>
+                        <div class="kanban-cards" id="kanbanReview"></div>
+                    </div>
+                    <div class="kanban-column" data-state="done">
+                        <h3>✅ Done <span class="kanban-count" id="countDone">0</span></h3>
+                        <div class="kanban-cards" id="kanbanDone"></div>
+                    </div>
+                    <div class="kanban-column" data-state="failed">
+                        <h3>❌ Failed <span class="kanban-count" id="countFailed">0</span></h3>
+                        <div class="kanban-cards" id="kanbanFailed"></div>
+                    </div>
+                </div>
             </div>
-        </section>
+
+            <!-- MESSAGES (conversation viewer) -->
+            <div id="subtabMessages" class="subtab-content">
+                <section class="panel">
+                    <div class="conversation-viewer" id="conversationViewer">
+                        <p class="empty-state">Loading messages...</p>
+                    </div>
+                </section>
+            </div>
+
+            <!-- ARTIFACTS (file browser) -->
+            <div id="subtabArtifacts" class="subtab-content">
+                <section class="panel">
+                    <div class="artifact-list" id="artifactBrowser">
+                        <p class="empty-state">Loading artifacts...</p>
+                    </div>
+                </section>
+            </div>
+        </div>
     </main>
+
+    <!-- Artifact modal -->
+    <div class="modal-overlay" id="artifactModal" onclick="closeModal('artifactModal')">
+        <div class="modal-content modal-wide" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h3 id="artifactModalTitle">Artifact</h3>
+                <button class="modal-close" onclick="closeModal('artifactModal')">✕</button>
+            </div>
+            <div class="modal-body">
+                <pre><code id="artifactModalCode"></code></pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- Task detail modal -->
+    <div class="modal-overlay" id="taskModal" onclick="closeModal('taskModal')">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h3 id="taskModalTitle">Task Detail</h3>
+                <button class="modal-close" onclick="closeModal('taskModal')">✕</button>
+            </div>
+            <div class="modal-body" id="taskModalBody"></div>
+            <div class="modal-footer" id="taskModalFooter"></div>
+        </div>
+    </div>
 
     <script src="/js/app.js"></script>
 </body>
