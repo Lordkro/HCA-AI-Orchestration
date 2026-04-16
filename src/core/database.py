@@ -268,12 +268,12 @@ class Database:
         """Insert a new project."""
         try:
             await self.db.execute(
-                """INSERT INTO projects (id, name, description, created_at, updated_at, status, idea)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO projects (id, name, description, created_at, updated_at, status, idea, tokens_used)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     project.id, project.name, project.description,
                     project.created_at.isoformat(), project.updated_at.isoformat(),
-                    project.status, project.idea,
+                    project.status, project.idea, project.tokens_used,
                 ),
             )
             await self.db.commit()
@@ -319,7 +319,7 @@ class Database:
         all others are silently ignored.  Field names are validated against
         a static allowlist so they are never interpolated from user input.
         """
-        allowed = {"name", "description", "status"}
+        allowed = {"name", "description", "status", "tokens_used"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return

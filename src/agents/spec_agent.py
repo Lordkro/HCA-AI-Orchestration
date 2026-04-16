@@ -97,7 +97,7 @@ Be extremely specific. The Coder agent will implement directly from this spec.
 Use code blocks for schemas, API definitions, and file structures.
 Do NOT write the actual implementation code — only the specification."""
 
-        response = await self.think(prompt, project_id=message.project_id, temperature=0.5)
+        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.5)
 
         return self.create_message(
             recipient=AgentRole.PM,
@@ -117,7 +117,7 @@ FEEDBACK:
 
 Please revise the specification to address all feedback points. Output the complete updated specification."""
 
-        response = await self.think(prompt, project_id=message.project_id, temperature=0.5)
+        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.5)
 
         return self.create_message(
             recipient=AgentRole.PM,
@@ -136,7 +136,7 @@ Please revise the specification to address all feedback points. Output the compl
 
 Provide a clear, detailed answer referencing the relevant parts of the spec."""
 
-        response = await self.think(prompt, project_id=message.project_id, temperature=0.5)
+        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.5)
 
         return self.create_message(
             recipient=message.sender,

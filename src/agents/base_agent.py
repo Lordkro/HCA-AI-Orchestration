@@ -367,11 +367,12 @@ class BaseAgent(ABC):
         history = self._get_history(project_id)
         history.append(ConversationEntry(role=role, content=content))
 
-        # Auto-prune: keep the most recent turns only
+        # Auto-prune: keep first 2 turns (early context) + most recent turns
         if len(history) > self.MAX_HISTORY_PER_PROJECT:
-            # Keep system-prompt-relevant early turns and recent ones
+            keep_early = 2  # Preserve earliest context (e.g., initial plan)
             overflow = len(history) - self.MAX_HISTORY_PER_PROJECT
-            del history[:overflow]
+            # Delete from just after the early turns
+            del history[keep_early:keep_early + overflow]
 
     def clear_history(self, project_id: str | None = None) -> None:
         """Clear conversation history for one project or all projects."""
@@ -389,6 +390,7 @@ class BaseAgent(ABC):
         prompt: str,
         *,
         project_id: str = "",
+        task_id: str = "",
         temperature: float = 0.7,
         max_tokens: int = 4096,
     ) -> str:
@@ -398,6 +400,7 @@ class BaseAgent(ABC):
             prompt: The user-role content to send.
             project_id: Isolates conversation history by project.  If empty,
                         uses a shared "_global" bucket (for non-project queries).
+            task_id: Optional task ID for per-task token tracking.
             temperature: Sampling temperature.
             max_tokens: Max tokens in the response.
 
@@ -451,7 +454,7 @@ class BaseAgent(ABC):
             response_tokens = estimate_tokens(response)
             total_tokens = prompt_tokens + response_tokens
             try:
-                await self.task_manager.record_tokens(project_id, "", total_tokens)
+                await self.task_manager.record_tokens(project_id, task_id, total_tokens)
             except Exception:
                 pass  # Don't let token tracking break agent flow
 

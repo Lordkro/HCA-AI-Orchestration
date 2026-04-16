@@ -100,10 +100,18 @@ Then provide:
 
 Be constructive but thorough. Do not approve work that has critical or major issues."""
 
-        response = await self.think(prompt, project_id=message.project_id, temperature=0.3)
+        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.3)
 
-        # Determine if approved or needs revision
-        is_approved = "**APPROVED**" in response.upper() or "APPROVED" in response.split("\n")[0].upper()
+        # Determine if approved or needs revision.
+        # Check the first few lines for the verdict (LLMs may add a short preamble).
+        response_upper = response.upper()
+        first_lines = "\n".join(response.split("\n")[:5]).upper()
+        is_approved = (
+            "**APPROVED**" in first_lines
+            or first_lines.lstrip().startswith("APPROVED")
+            # Fallback: scan the full response only if "NEEDS REVISION" is absent
+            or ("APPROVED" in response_upper and "NEEDS REVISION" not in response_upper)
+        )
 
         if is_approved:
             return self.create_message(
@@ -138,7 +146,7 @@ Be constructive but thorough. Do not approve work that has critical or major iss
 
 Clarify your feedback with specific examples and suggestions."""
 
-        response = await self.think(prompt, project_id=message.project_id, temperature=0.4)
+        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.4)
 
         return self.create_message(
             recipient=message.sender,

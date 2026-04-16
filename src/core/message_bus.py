@@ -390,7 +390,13 @@ class MessageBus:
         inbox_stream = AGENT_STREAM.format(agent=agent.value)
         try:
             info = await self.redis.xpending(inbox_stream, CONSUMER_GROUP)
-            return info.get("pending", 0) if isinstance(info, dict) else 0
+            # xpending returns a dict with "pending" key (redis-py >= 5)
+            # or a list [pending_count, min_id, max_id, consumers] in older versions
+            if isinstance(info, dict):
+                return info.get("pending", 0)
+            elif isinstance(info, (list, tuple)) and len(info) >= 1:
+                return int(info[0])
+            return 0
         except (aioredis.ResponseError, aioredis.ConnectionError):
             return 0
 

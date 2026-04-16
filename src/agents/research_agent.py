@@ -73,7 +73,7 @@ Please conduct thorough research and provide a detailed report covering:
 Be specific and actionable. The Specification Agent will use your report to write detailed technical specs.
 Format your output clearly with sections and bullet points."""
 
-        response = await self.think(prompt, project_id=message.project_id, temperature=0.6)
+        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.6)
 
         # Send research report to PM (who will route to Spec agent)
         return self.create_message(
@@ -94,7 +94,7 @@ QUESTION: {message.payload.content}
 
 Provide a thorough, well-reasoned answer with specific recommendations."""
 
-        response = await self.think(prompt, project_id=message.project_id, temperature=0.5)
+        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.5)
 
         return self.create_message(
             recipient=message.sender,
@@ -113,7 +113,7 @@ FEEDBACK:
 
 Please revise and improve your research based on this feedback. Address all points raised."""
 
-        response = await self.think(prompt, project_id=message.project_id, temperature=0.6)
+        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.6)
 
         return self.create_message(
             recipient=AgentRole.PM,

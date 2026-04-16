@@ -92,5 +92,6 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         if pubsub is not None:
             try:
                 await pubsub.unsubscribe("hca:notifications")
+                await pubsub.aclose()
             except Exception:
                 pass

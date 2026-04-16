@@ -122,17 +122,18 @@ class Pipeline:
                 ]
                 for task in all_tasks:
                     if task.state in active_states and not self.guardrails.check_task_timeout(task):
+                        old_state = task.state.value
                         logger.warning(
                             "pipeline_failing_timed_out_task",
                             task_id=task.id,
-                            state=task.state.value,
+                            state=old_state,
                             project_id=project.id,
                         )
                         task.state = TaskState.FAILED
                         task.feedback = (
                             f"Task timed out after "
                             f"{self.guardrails.task_timeout_minutes} minutes "
-                            f"in state '{task.state.value}'"
+                            f"in state '{old_state}'"
                         )
                         await db.update_task(task)
                         await self.bus.publish_ui_event(
@@ -140,7 +141,7 @@ class Pipeline:
                             {
                                 "task_id": task.id,
                                 "project_id": project.id,
-                                "old_state": task.state.value,
+                                "old_state": old_state,
                                 "new_state": TaskState.FAILED.value,
                                 "reason": "timeout",
                             },

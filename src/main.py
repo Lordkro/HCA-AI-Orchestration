@@ -26,7 +26,7 @@ logger = structlog.get_logger()
 
 async def main() -> None:
     """Start the HCA Orchestration system."""
-    setup_logging()
+    setup_logging(log_level=settings.log_level, log_format=settings.log_format)
     logger.info("Starting HCA Orchestration", version="0.1.0")
 
     # Initialize core services
@@ -121,6 +121,7 @@ async def main() -> None:
     for agent in agents:
         await agent.stop()
     pipeline.stop()
+    await ollama.close()
     await bus.disconnect()
     await db.close()
 

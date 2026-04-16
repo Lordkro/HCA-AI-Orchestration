@@ -150,23 +150,15 @@ class OllamaClient:
         path: str,
         *,
         json_data: dict | None = None,
-        stream: bool = False,
     ) -> httpx.Response:
         """Make an HTTP request with exponential backoff retry."""
         last_error: Exception | None = None
 
         for attempt in range(self.max_retries + 1):
             try:
-                if stream:
-                    # For streaming, we return the response directly
-                    # Caller is responsible for the context manager
-                    response = await self._client.request(
-                        method, path, json=json_data
-                    )
-                else:
-                    response = await self._client.request(
-                        method, path, json=json_data
-                    )
+                response = await self._client.request(
+                    method, path, json=json_data
+                )
 
                 # Check for model not found errors
                 if response.status_code == 404:
@@ -479,38 +471,65 @@ class OllamaClient:
         start = time.monotonic()
         token_count = 0
 
-        async with self._client.stream("POST", "/api/chat", json=payload) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if line:
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    token = data.get("message", {}).get("content", "")
-                    if token:
-                        token_count += 1
-                        yield token
-                    # Check if this is the final message with stats
-                    if data.get("done", False):
-                        elapsed = time.monotonic() - start
-                        eval_count = data.get("eval_count", token_count)
-                        stats = GenerationStats(
-                            model=model,
-                            prompt_tokens=data.get("prompt_eval_count", 0),
-                            completion_tokens=eval_count,
-                            total_tokens=data.get("prompt_eval_count", 0) + eval_count,
-                            duration_seconds=elapsed,
-                            tokens_per_second=eval_count / elapsed if elapsed > 0 else 0,
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                async with self._client.stream("POST", "/api/chat", json=payload) as response:
+                    if response.status_code == 404:
+                        raise OllamaModelError(
+                            f"Model '{model}' not found. Pull it first with: ollama pull {model}"
                         )
-                        self.stats.record(stats)
-                        logger.info(
-                            "ollama_chat_stream_complete",
-                            model=model,
-                            tokens=eval_count,
-                            duration_s=round(elapsed, 2),
-                            tok_per_s=round(stats.tokens_per_second, 1),
-                        )
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if line:
+                            try:
+                                data = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            token = data.get("message", {}).get("content", "")
+                            if token:
+                                token_count += 1
+                                yield token
+                            # Check if this is the final message with stats
+                            if data.get("done", False):
+                                elapsed = time.monotonic() - start
+                                eval_count = data.get("eval_count", token_count)
+                                stats = GenerationStats(
+                                    model=model,
+                                    prompt_tokens=data.get("prompt_eval_count", 0),
+                                    completion_tokens=eval_count,
+                                    total_tokens=data.get("prompt_eval_count", 0) + eval_count,
+                                    duration_seconds=elapsed,
+                                    tokens_per_second=eval_count / elapsed if elapsed > 0 else 0,
+                                )
+                                self.stats.record(stats)
+                                logger.info(
+                                    "ollama_chat_stream_complete",
+                                    model=model,
+                                    tokens=eval_count,
+                                    duration_s=round(elapsed, 2),
+                                    tok_per_s=round(stats.tokens_per_second, 1),
+                                )
+                return  # Success — exit retry loop
+
+            except OllamaModelError:
+                raise
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                last_error = e
+                if attempt < self.max_retries:
+                    delay = self.retry_base_delay * (2 ** attempt)
+                    self.stats.total_retries += 1
+                    logger.warning(
+                        "ollama_stream_retry",
+                        attempt=attempt + 1,
+                        max_retries=self.max_retries,
+                        delay_seconds=delay,
+                        error=str(e),
+                    )
+                    await asyncio.sleep(delay)
+
+        self.stats.total_failures += 1
+        raise OllamaError(f"Streaming request failed after all retries: {last_error}")
 
     # --------------------------------------------------------
     # Model Management

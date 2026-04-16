@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     # --- Ollama ---
     ollama_base_url: str = "http://ollama:11434"
     ollama_default_model: str = "qwen2.5:32b"
-    ollama_coder_model: str = "qwen2.5-coder:32b"
+    ollama_coder_model: str = "qwen2.5-coder:32b"  # Default coder model (fallback)
     ollama_timeout: int = 120
     ollama_num_ctx: int = 8192
     ollama_max_retries: int = 3
@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     ollama_pm_model: str = ""
     ollama_research_model: str = ""
     ollama_spec_model: str = ""
-    ollama_coder_model_override: str = ""
+    ollama_coder_model_override: str = ""  # If set, overrides ollama_coder_model
     ollama_critic_model: str = ""
 
     # --- Redis ---

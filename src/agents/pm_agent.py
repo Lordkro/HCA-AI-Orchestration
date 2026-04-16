@@ -146,7 +146,7 @@ Think step by step about what needs to be built and in what order."""
         elif self.task_manager:
             # Two-pass creation: first create all tasks, then resolve deps
             title_to_id: dict[str, str] = {}
-            persisted: list[Task] = []
+            persisted: list[tuple[dict, Task]] = []
             for t in tasks:
                 try:
                     created = await self.task_manager.create_task(
@@ -156,7 +156,7 @@ Think step by step about what needs to be built and in what order."""
                         assigned_to=AgentRole(str(t["agent"])),
                     )
                     title_to_id[str(t["title"]).lower()] = created.id
-                    persisted.append(created)
+                    persisted.append((t, created))
                 except (ValueError, KeyError) as exc:
                     logger.warning(
                         "pm_task_create_skipped",
@@ -165,7 +165,7 @@ Think step by step about what needs to be built and in what order."""
                     )
 
             # Second pass: resolve depends_on titles → IDs
-            for task_dict, task_obj in zip(tasks, persisted):
+            for task_dict, task_obj in persisted:
                 dep_titles = task_dict.get("depends_on_titles", [])
                 if dep_titles and isinstance(dep_titles, list):
                     dep_ids = []
@@ -177,7 +177,7 @@ Think step by step about what needs to be built and in what order."""
                         task_obj.depends_on = dep_ids
                         await self.db.update_task(task_obj)
 
-            tasks = persisted  # type: ignore[assignment]
+            tasks = [task_obj for _, task_obj in persisted]  # type: ignore[assignment]
 
         # Kick off the first pending task
         return await self._assign_next_task(project_id)
@@ -314,7 +314,7 @@ DELIVERABLE (summary):
 Provide any additional context or instructions for the {next_agent.value} agent
 who will work on this next.  Be concise."""
 
-        response = await self.think(prompt, project_id=message.project_id)
+        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id)
 
         return self.create_message(
             recipient=next_agent,
@@ -357,7 +357,7 @@ who will work on this next.  Be concise."""
 Based on this feedback, provide clear instructions for the {revision_target.value} agent
 who will make the revisions. Be specific about what needs to change."""
 
-        response = await self.think(prompt, project_id=message.project_id)
+        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id)
 
         return self.create_message(
             recipient=revision_target,
@@ -385,7 +385,7 @@ who will make the revisions. Be specific about what needs to change."""
 
 Please provide a clear, decisive answer to help them proceed."""
 
-        response = await self.think(prompt, project_id=message.project_id)
+        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id)
 
         return self.create_message(
             recipient=message.sender,
