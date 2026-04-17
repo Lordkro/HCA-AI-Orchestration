@@ -6,8 +6,8 @@
 #   docker compose run --rm model-puller
 #
 # Or manually:
-#   docker compose exec ollama ollama pull qwen2.5:32b
-#   docker compose exec ollama ollama pull qwen2.5-coder:32b
+#   docker compose exec ollama ollama pull qwen3.5:27b
+#   docker compose exec ollama ollama pull qwen3-coder:30b
 # ============================================================
 
 set -e
@@ -17,12 +17,12 @@ echo ""
 
 OLLAMA_HOST="${OLLAMA_BASE_URL:-http://localhost:11434}"
 
-echo "Pulling qwen2.5:32b (default model)..."
-curl -s "$OLLAMA_HOST/api/pull" -d '{"name": "qwen2.5:32b"}' | tail -1
+echo "Pulling qwen3.5:27b (default model)..."
+curl -s "$OLLAMA_HOST/api/pull" -d '{"name": "qwen3.5:27b"}' | tail -1
 echo ""
 
-echo "Pulling qwen2.5-coder:32b (coder model)..."
-curl -s "$OLLAMA_HOST/api/pull" -d '{"name": "qwen2.5-coder:32b"}' | tail -1
+echo "Pulling qwen3-coder:30b (coder model)..."
+curl -s "$OLLAMA_HOST/api/pull" -d '{"name": "qwen3-coder:30b"}' | tail -1
 echo ""
 
 echo "=== All models pulled successfully! ==="

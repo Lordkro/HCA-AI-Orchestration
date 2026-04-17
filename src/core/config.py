@@ -8,8 +8,8 @@ class Settings(BaseSettings):
 
     # --- Ollama ---
     ollama_base_url: str = "http://ollama:11434"
-    ollama_default_model: str = "qwen2.5:32b"
-    ollama_coder_model: str = "qwen2.5-coder:32b"  # Default coder model (fallback)
+    ollama_default_model: str = "qwen3.5:27b"
+    ollama_coder_model: str = "qwen3-coder:30b"  # Default coder model (fallback)
     ollama_timeout: int = 120
     ollama_num_ctx: int = 8192
     ollama_max_retries: int = 3

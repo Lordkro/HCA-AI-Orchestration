@@ -518,21 +518,21 @@ and partial offload, the 32B model runs at excellent speeds on this hardware.
 
 | Tier       | Model                | VRAM+RAM     | Speed (est.)     | When to Use                             |
 |------------|----------------------|--------------|------------------|-----------------------------------------|
-| Default    | `qwen2.5:32b`       | 16GB + ~6GB  | ~15-25 tok/s     | Best quality, recommended               |
-| Coder swap | `qwen2.5-coder:32b` | 16GB + ~6GB  | ~15-25 tok/s     | Optional: swap in for coding tasks only |
-| Fallback   | `qwen2.5:14b`       | ~10 GB       | ~30-50 tok/s     | If 32B is too slow for iteration        |
+| Default    | `qwen3.5:27b`       | ~17 GB       | ~20-35 tok/s     | Best quality, multimodal, thinking mode |
+| Coder      | `qwen3-coder:30b`   | ~19 GB       | ~25-40 tok/s     | MoE (3.3B active), agentic coding RL    |
+| Fallback   | `qwen3.5:9b`        | ~7 GB        | ~40-60 tok/s     | If 27B is too slow for iteration        |
 
 ## Configuration Defaults
 
 | Setting                  | Default Value              |
 |--------------------------|----------------------------|
 | Ollama base URL          | `http://ollama:11434`      |
-| Default model            | `qwen2.5:32b`              |
-| PM model                 | `qwen2.5:32b`              |
-| Research model           | `qwen2.5:32b`              |
-| Spec model               | `qwen2.5:32b`              |
-| Coder model              | `qwen2.5-coder:32b`        |
-| Critic model             | `qwen2.5:32b`              |
+| Default model            | `qwen3.5:27b`              |
+| PM model                 | `qwen3.5:27b`              |
+| Research model           | `qwen3.5:27b`              |
+| Spec model               | `qwen3.5:27b`              |
+| Coder model              | `qwen3-coder:30b`          |
+| Critic model             | `qwen3.5:27b`              |
 | Redis URL                | `redis://redis:6379`       |
 | Max iterations per task  | `5`                        |
 | Max tasks per project    | `50`                       |

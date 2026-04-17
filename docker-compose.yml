@@ -94,11 +94,11 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        echo "Pulling default model: qwen2.5:32b ..."
-        curl -s http://ollama:11434/api/pull -d '{"name": "qwen2.5:32b"}' | head -1
+        echo "Pulling default model: qwen3.5:27b ..."
+        curl -s http://ollama:11434/api/pull -d '{"name": "qwen3.5:27b"}' | head -1
         echo ""
-        echo "Pulling coder model: qwen2.5-coder:32b ..."
-        curl -s http://ollama:11434/api/pull -d '{"name": "qwen2.5-coder:32b"}' | head -1
+        echo "Pulling coder model: qwen3-coder:30b ..."
+        curl -s http://ollama:11434/api/pull -d '{"name": "qwen3-coder:30b"}' | head -1
         echo ""
         echo "All models pulled successfully!"
     profiles:

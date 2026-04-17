@@ -35,7 +35,7 @@ cp .env.example .env
 docker compose --profile setup run --rm model-puller
 ```
 
-This pulls `qwen2.5:32b` and `qwen2.5-coder:32b` (~20GB each). Be patient!
+This pulls `qwen3.5:27b` and `qwen3-coder:30b` (~17-19GB each). Be patient!
 
 ### 3. Start the system
 
@@ -117,8 +117,8 @@ All settings are in `.env`. Key options:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OLLAMA_DEFAULT_MODEL` | `qwen2.5:32b` | Model for all agents |
-| `OLLAMA_CODER_MODEL` | `qwen2.5-coder:32b` | Model for the Coder agent |
+| `OLLAMA_DEFAULT_MODEL` | `qwen3.5:27b` | Model for all agents |
+| `OLLAMA_CODER_MODEL` | `qwen3-coder:30b` | Model for the Coder agent |
 | `MAX_ITERATIONS_PER_TASK` | `5` | Max revision cycles |
 | `TASK_TIMEOUT_MINUTES` | `30` | Timeout per task |
 | `WEB_PORT` | `8080` | Dashboard port |
