@@ -204,11 +204,15 @@ class BaseAgent(ABC):
                 results = await self.bus.consume(
                     self.role, last_id=">", block_ms=2000
                 )
-                for stream_name, entry_id, msg in results:
-                    if msg.sender == self.role:
-                        await self.bus.acknowledge(stream_name, entry_id)
-                        continue
-                    await self._handle_message_reliable(stream_name, entry_id, msg)
+                if not results:
+                    # No messages, pause briefly to avoid tight loop
+                    await asyncio.sleep(0.5)
+                else:
+                    for stream_name, entry_id, msg in results:
+                        if msg.sender == self.role:
+                            await self.bus.acknowledge(stream_name, entry_id)
+                            continue
+                        await self._handle_message_reliable(stream_name, entry_id, msg)
 
             except asyncio.CancelledError:
                 break

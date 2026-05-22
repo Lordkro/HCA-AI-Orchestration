@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     log_format: str = "json"
 
     # --- Workspace ---
-    workspace_dir: str = "/workspace"
+    workspace_dir: str = "/tmp/workspace"
 
     def get_agent_model(self, agent_name: str) -> str:
         """Get the model for a specific agent, falling back to default."""

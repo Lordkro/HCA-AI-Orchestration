@@ -74,13 +74,17 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         redis_task = asyncio.create_task(listen_redis())
 
         while True:
-            # Receive any messages from the client (e.g., commands)
-            data = await websocket.receive_text()
+            try:
+                data = await websocket.receive_text()
+            except Exception:
+                break
             try:
                 cmd = json.loads(data)
                 await websocket.send_text(json.dumps({"type": "ack", "command": cmd}))
             except json.JSONDecodeError:
                 pass
+            # Prevent tight loop when client silent
+            await asyncio.sleep(0.1)
 
     except WebSocketDisconnect:
         pass

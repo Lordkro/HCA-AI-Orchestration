@@ -74,14 +74,27 @@ async def main() -> None:
     # Start the web API
     app = create_app(db=db, bus=bus, task_manager=task_manager, agents=agents)
 
+    # Acquire single-instance lock
+    import fcntl, os
+    lock_path = "/tmp/HCA-AI-Orchestration/run.lock"
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        logger.error("Another instance is already running; aborting startup.")
+        return
+    # Register cleanup to release lock on normal or abnormal exit
+    import atexit
+    def _release_lock():
+        try:
+            lock_file.close()
+            os.unlink(lock_path)
+            logger.info("Lock file removed, instance shutdown cleanly.")
+        except Exception as e:
+            logger.error("Failed to remove lock file", error=str(e))
+    atexit.register(_release_lock)
     # Start all agents
     agent_tasks = [asyncio.create_task(agent.start()) for agent in agents]
-    pipeline_task = asyncio.create_task(pipeline.start())
-
-    # Start the web server
-    import uvicorn
-    config = uvicorn.Config(app, host=settings.web_host, port=settings.web_port, log_level="info")
-    server = uvicorn.Server(config)
 
     # Handle graceful shutdown
     shutdown_event = asyncio.Event()
