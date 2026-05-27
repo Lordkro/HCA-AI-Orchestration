@@ -50,6 +50,9 @@ class Pipeline:
         logger.info("pipeline_started")
 
         while self._running:
+            # ensure graceful stop after each await
+            if not self._running:
+                break
             try:
                 self._tick_count += 1
 
