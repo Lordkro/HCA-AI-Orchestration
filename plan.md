@@ -373,71 +373,86 @@ HCA-Orchestration/
 ├── README.md                   # Project documentation
 ├── plan.md                     # This file
 │
-├── src/
-│   ├── __init__.py
-│   │
-│   ├── core/                   # Shared infrastructure
-│   │   ├── __init__.py
-│   │   ├── config.py           # Configuration management
-│   │   ├── ollama_client.py    # Ollama API wrapper
-│   │   ├── message_bus.py      # Redis Streams wrapper
-│   │   ├── database.py         # SQLite persistence layer
-│   │   ├── models.py           # Data models (Pydantic)
-│   │   └── logger.py           # Structured logging setup
-│   │
-│   ├── agents/                 # Agent implementations
-│   │   ├── __init__.py
-│   │   ├── base_agent.py       # Abstract base agent class
-│   │   ├── pm_agent.py         # Project Manager
-│   │   ├── research_agent.py   # Research Agent
-│   │   ├── spec_agent.py       # Specification Agent
-│   │   ├── coder_agent.py      # Coder Agent
-│   │   └── critic_agent.py     # Critic Agent
-│   │
-│   ├── orchestrator/           # Workflow engine
-│   │   ├── __init__.py
-│   │   ├── pipeline.py         # Pipeline definitions
-│   │   ├── task_manager.py     # Task state machine
-│   │   └── guardrails.py       # Safety limits and controls
-│   │
-│   ├── api/                    # Web API layer
-│   │   ├── __init__.py
-│   │   ├── app.py              # FastAPI application
-│   │   ├── routes/
-│   │   │   ├── projects.py     # Project endpoints
-│   │   │   ├── agents.py       # Agent status endpoints
-│   │   │   ├── tasks.py        # Task endpoints
-│   │   │   └── websocket.py    # WebSocket handler
-│   │   └── static/             # Frontend assets
-│   │       ├── index.html
-│   │       ├── css/
-│   │       │   └── styles.css
-│   │       └── js/
-│   │           └── app.js
-│   │
-│   └── prompts/                # System prompts for each agent
-│       ├── pm.txt
-│       ├── research.txt
-│       ├── spec.txt
-│       ├── coder.txt
-│       └── critic.txt
+├── config/                     # Configuration files (YAML/JSON)
+├── docs/                       # Documentation
+│   ├── ARCHITECTURE.md
+│   └── README.md
 │
-├── workspace/                  # Shared volume for generated projects
-│   └── .gitkeep
+├── src/
+│   └── hca/                    # Main package (hca namespace)
+│       ├── __init__.py
+│       │
+│       ├── core/               # Shared infrastructure
+│       │   ├── __init__.py
+│       │   ├── config.py           # Configuration management
+│       │   ├── ollama_client.py    # Ollama API wrapper
+│       │   ├── message_bus.py      # Redis Streams wrapper
+│       │   ├── database.py         # SQLite persistence layer
+│       │   ├── models.py           # Data models (Pydantic)
+│       │   └── logger.py           # Structured logging setup
+│       │
+│       ├── agents/             # Agent implementations
+│       │   ├── __init__.py
+│       │   ├── base_agent.py       # Abstract base agent class
+│       │   ├── pm_agent.py         # Project Manager
+│       │   ├── research_agent.py   # Research Agent
+│       │   ├── spec_agent.py       # Specification Agent
+│       │   ├── coder_agent.py      # Coder Agent
+│       │   └── critic_agent.py     # Critic Agent
+│       │
+│       ├── orchestrator/       # Workflow engine
+│       │   ├── __init__.py
+│       │   ├── pipeline.py         # Pipeline definitions
+│       │   ├── task_manager.py     # Task state machine
+│       │   └── guardrails.py       # Safety limits and controls
+│       │
+│       ├── api/                # Web API layer
+│       │   ├── __init__.py
+│       │   ├── app.py              # FastAPI application
+│       │   ├── routes/
+│       │   │   ├── projects.py     # Project endpoints
+│       │   │   ├── agents.py       # Agent status endpoints
+│       │   │   ├── tasks.py        # Task endpoints
+│       │   │   └── websocket.py    # WebSocket handler
+│       │   └── static/             # Frontend assets
+│       │       ├── index.html
+│       │       ├── css/
+│       │       │   └── styles.css
+│       │       └── js/
+│       │           └── app.js
+│       │
+│       └── prompts/            # System prompts for each agent
+│           ├── pm.txt
+│           ├── research.txt
+│           ├── spec.txt
+│           ├── coder.txt
+│           └── critic.txt
 │
 ├── tests/                      # Test suite
 │   ├── conftest.py             # Shared fixtures (temp DB, mock Ollama/Redis)
-│   ├── test_ollama_client.py
-│   ├── test_message_bus.py
-│   ├── test_database.py
-│   ├── test_agents.py
-│   ├── test_pipeline.py
-│   ├── test_orchestration.py
-│   └── test_integration.py
+│   ├── unit/                   # Unit tests
+│   │   ├── test_agents.py
+│   │   ├── test_api.py
+│   │   ├── test_database.py
+│   │   ├── test_message_bus.py
+│   │   ├── test_ollama_client.py
+│   │   └── conftest.py
+│   ├── integration/            # Integration tests
+│   │   ├── test_integration.py
+│   │   ├── test_orchestration.py
+│   │   ├── test_pipeline.py
+│   │   └── conftest.py
+│   └── fixtures/               # Shared test fixtures
+│       └── conftest.py
 │
-└── scripts/                    # Utility scripts
-    ├── setup_ollama_models.sh  # Pull required models
-    └── reset_workspace.sh      # Clean workspace state
+├── scripts/                    # Utility scripts
+│   ├── setup_ollama_models.sh  # Pull required models
+│   └── reset_workspace.sh      # Clean workspace state
+│
+└── .data/                      # Runtime data (git-ignored)
+    ├── workspaces/             # Generated projects
+    ├── logs/                   # Application logs
+    └── cache/                  # Runtime cache
 ```
 
 ---

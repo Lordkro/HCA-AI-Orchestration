@@ -87,38 +87,49 @@ Navigate to [http://localhost:8080](http://localhost:8080) and submit your first
 
 ```
 HCA-Orchestration/
+├── config/                 # Configuration files (YAML/JSON)
+├── docs/                   # Documentation
+│   ├── ARCHITECTURE.md     # System architecture
+│   └── README.md
+├── src/
+│   └── hca/                # Main package (hca namespace)
+│       ├── main.py         # Application entrypoint
+│       ├── core/           # Shared infrastructure
+│       │   ├── config.py       # Settings from env vars
+│       │   ├── ollama_client.py # Ollama API wrapper
+│       │   ├── message_bus.py   # Redis Streams
+│       │   ├── database.py      # SQLite persistence
+│       │   ├── models.py        # Pydantic data models
+│       │   └── logger.py        # Structured logging
+│       ├── agents/         # Agent implementations
+│       │   ├── base_agent.py   # Abstract base class
+│       │   ├── pm_agent.py     # Project Manager
+│       │   ├── research_agent.py
+│       │   ├── spec_agent.py
+│       │   ├── coder_agent.py
+│       │   └── critic_agent.py
+│       ├── orchestrator/   # Workflow engine
+│       │   ├── pipeline.py
+│       │   ├── task_manager.py
+│       │   └── guardrails.py
+│       ├── api/            # Web API + UI
+│       │   ├── app.py
+│       │   ├── routes/
+│       │   └── static/
+│       └── prompts/        # System prompts per agent
+├── tests/                  # Test suite
+│   ├── unit/               # Unit tests
+│   ├── integration/        # Integration tests
+│   └── fixtures/           # Shared test fixtures
+├── scripts/                # Utility scripts
+├── .data/                  # Runtime data (git-ignored)
+│   ├── workspaces/         # Generated project files
+│   ├── logs/               # Application logs
+│   └── cache/              # Runtime cache
 ├── docker-compose.yml      # All services
 ├── Dockerfile              # Python app image
-├── pyproject.toml          # Dependencies
-├── .env.example            # Configuration template
-├── src/
-│   ├── main.py             # Application entrypoint
-│   ├── core/               # Shared infrastructure
-│   │   ├── config.py       # Settings from env vars
-│   │   ├── ollama_client.py # Ollama API wrapper
-│   │   ├── message_bus.py  # Redis Streams
-│   │   ├── database.py     # SQLite persistence
-│   │   ├── models.py       # Pydantic data models
-│   │   └── logger.py       # Structured logging
-│   ├── agents/             # Agent implementations
-│   │   ├── base_agent.py   # Abstract base class
-│   │   ├── pm_agent.py     # Project Manager
-│   │   ├── research_agent.py
-│   │   ├── spec_agent.py
-│   │   ├── coder_agent.py
-│   │   └── critic_agent.py
-│   ├── orchestrator/       # Workflow engine
-│   │   ├── pipeline.py
-│   │   ├── task_manager.py
-│   │   └── guardrails.py
-│   ├── api/                # Web API + UI
-│   │   ├── app.py
-│   │   ├── routes/
-│   │   └── static/
-│   └── prompts/            # System prompts per agent
-├── workspace/              # Generated project files
-├── tests/                  # Test suite
-└── scripts/                # Utility scripts
+├── pyproject.toml          # Dependencies & build config
+└── .env.example            # Configuration template
 ```
 
 ## ⚙️ Configuration

@@ -12,25 +12,14 @@ env/
 .env
 
 # Database
-data/*.db
-data/*.db-journal
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Docker
-docker-compose.override.yml
+.data/*.db
+.data/*.db-journal
+.data/logs/
+.data/cache/
 
 # Workspace generated files (tracked separately)
-workspace/*
-!workspace/.gitkeep
+.data/workspaces/*
+!.data/workspaces/.gitkeep
 
 # Distribution
 dist/
