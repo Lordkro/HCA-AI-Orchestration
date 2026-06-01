@@ -18,8 +18,9 @@ No real LLM or Redis required.  Tests are deterministic and fast.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
-from datetime import datetime, timedelta, timezone
 
 from src.agents.coder_agent import CoderAgent
 from src.agents.critic_agent import CriticAgent
@@ -30,18 +31,14 @@ from src.core.database import Database
 from src.core.models import (
     AgentMessage,
     AgentRole,
-    MessagePayload,
     MessageType,
-    Priority,
     Project,
-    Task,
     TaskState,
 )
 from src.orchestrator.guardrails import Guardrails
 from src.orchestrator.pipeline import Pipeline
 from src.orchestrator.task_manager import TaskManager
 from tests.conftest import MockMessageBus, MockOllamaClient, make_message
-
 
 # ============================================================
 # Helpers
@@ -69,9 +66,13 @@ DEPENDS_ON: Write API specification
 DESCRIPTION: Implement the full API server with authentication endpoints based on the specification.
 """.strip()
 
-RESEARCH_RESPONSE = "Research report: Use JWT with RS256 for stateless auth. Recommended library: PyJWT."
+RESEARCH_RESPONSE = (
+    "Research report: Use JWT with RS256 for stateless auth. Recommended library: PyJWT."
+)
 
-SPEC_RESPONSE = "API Specification: POST /auth/login, POST /auth/register, GET /auth/me. Use Bearer tokens."
+SPEC_RESPONSE = (
+    "API Specification: POST /auth/login, POST /auth/register, GET /auth/me. Use Bearer tokens."
+)
 
 CODER_RESPONSE = """Here is the implementation:
 
@@ -158,9 +159,7 @@ def _find_messages(bus: MockMessageBus, recipient: AgentRole) -> list[AgentMessa
     return [m for m in bus.published if m.recipient == recipient]
 
 
-def _drain_messages_to(
-    bus: MockMessageBus, recipient: AgentRole
-) -> list[AgentMessage]:
+def _drain_messages_to(bus: MockMessageBus, recipient: AgentRole) -> list[AgentMessage]:
     """Pop and return all messages addressed to *recipient*, leaving the rest."""
     matched = [m for m in bus.published if m.recipient == recipient]
     bus.published = [m for m in bus.published if m.recipient != recipient]
@@ -220,7 +219,7 @@ class TestHappyPath:
         research: ResearchAgent = agents[AgentRole.RESEARCH]
         spec: SpecAgent = agents[AgentRole.SPEC]
         coder: CoderAgent = agents[AgentRole.CODER]
-        critic: CriticAgent = agents[AgentRole.CRITIC]
+        agents[AgentRole.CRITIC]
 
         # ── Step 1: User submits idea → PM ──────────────────────
         ollama.default_response = PM_PLAN_RESPONSE
@@ -331,12 +330,12 @@ class TestHappyPath:
         bus.published.clear()
         ollama.default_response = SPEC_RESPONSE
 
-        spec_assignment = _find_messages(bus, AgentRole.SPEC)
+        _find_messages(bus, AgentRole.SPEC)
         # The PM should have published a task assignment for spec
         # Check bus for the message sent via _assign_next_task
         # (it was published during critic_approval handling)
         # Get latest from all bus messages
-        all_spec_msgs = [m for m in bus.published if m.recipient == AgentRole.SPEC]
+        [m for m in bus.published if m.recipient == AgentRole.SPEC]
 
         # The PM sent the assignment as the return value of _handle_message
         # but it was also published. Let's find it in the full bus history.
@@ -465,7 +464,7 @@ class TestHappyPath:
     async def test_task_state_machine_integrity(self, env):
         """Verify every task passes through the expected state sequence."""
         db = env["db"]
-        bus: MockMessageBus = env["bus"]
+        env["bus"]
         ollama: MockOllamaClient = env["ollama"]
         tm: TaskManager = env["tm"]
         project: Project = env["project"]
@@ -526,8 +525,12 @@ class TestRevisionCycle:
         project = await _create_project(db)
         agents = _build_agents(db=db, bus=bus, ollama=ollama, task_manager=tm)
         return {
-            "db": db, "bus": bus, "ollama": ollama, "tm": tm,
-            "project": project, "agents": agents,
+            "db": db,
+            "bus": bus,
+            "ollama": ollama,
+            "tm": tm,
+            "project": project,
+            "agents": agents,
         }
 
     @pytest.mark.asyncio
@@ -634,14 +637,18 @@ class TestGuardrailIntegration:
         project = await _create_project(db)
         agents = _build_agents(db=db, bus=bus, ollama=ollama, task_manager=tm)
         return {
-            "db": db, "bus": bus, "ollama": ollama, "tm": tm,
-            "project": project, "agents": agents,
+            "db": db,
+            "bus": bus,
+            "ollama": ollama,
+            "tm": tm,
+            "project": project,
+            "agents": agents,
         }
 
     @pytest.mark.asyncio
     async def test_max_iterations_triggers_failure(self, env):
         """Task exceeds max iterations → guardrail fails the task and escalates."""
-        db = env["db"]
+        env["db"]
         bus: MockMessageBus = env["bus"]
         tm: TaskManager = env["tm"]
         project: Project = env["project"]
@@ -672,12 +679,14 @@ class TestGuardrailIntegration:
         # Escalation message should have been sent to PM
         pm_msgs = [m for m in bus.published if m.recipient == AgentRole.PM]
         assert len(pm_msgs) >= 1
-        assert "guardrail" in pm_msgs[-1].payload.content.lower() or "escalation" in pm_msgs[-1].payload.metadata.get("escalation_reason", "")
+        assert "guardrail" in pm_msgs[-1].payload.content.lower() or "escalation" in pm_msgs[
+            -1
+        ].payload.metadata.get("escalation_reason", "")
 
     @pytest.mark.asyncio
     async def test_task_limit_prevents_creation(self, env):
         """Cannot create tasks beyond the guardrail limit."""
-        db = env["db"]
+        env["db"]
         tm: TaskManager = env["tm"]
         project: Project = env["project"]
 
@@ -702,7 +711,7 @@ class TestGuardrailIntegration:
     @pytest.mark.asyncio
     async def test_token_budget_tracking(self, env):
         """Token usage is tracked across the project lifecycle."""
-        db = env["db"]
+        env["db"]
         tm: TaskManager = env["tm"]
         project: Project = env["project"]
 
@@ -815,17 +824,43 @@ class TestDependencyChains:
         tm: TaskManager = env["tm"]
         project: Project = env["project"]
 
-        a = await tm.create_task(project_id=project.id, title="A", description="root", assigned_to=AgentRole.RESEARCH)
-        b = await tm.create_task(project_id=project.id, title="B", description="b", assigned_to=AgentRole.SPEC, depends_on=[a.id])
-        c = await tm.create_task(project_id=project.id, title="C", description="c", assigned_to=AgentRole.SPEC, depends_on=[a.id])
-        d = await tm.create_task(project_id=project.id, title="D", description="d", assigned_to=AgentRole.CODER, depends_on=[b.id, c.id])
+        a = await tm.create_task(
+            project_id=project.id, title="A", description="root", assigned_to=AgentRole.RESEARCH
+        )
+        b = await tm.create_task(
+            project_id=project.id,
+            title="B",
+            description="b",
+            assigned_to=AgentRole.SPEC,
+            depends_on=[a.id],
+        )
+        c = await tm.create_task(
+            project_id=project.id,
+            title="C",
+            description="c",
+            assigned_to=AgentRole.SPEC,
+            depends_on=[a.id],
+        )
+        d = await tm.create_task(
+            project_id=project.id,
+            title="D",
+            description="d",
+            assigned_to=AgentRole.CODER,
+            depends_on=[b.id, c.id],
+        )
 
         # Only A is assignable
         assignable = await tm.get_assignable_tasks(project.id, limit=10)
         assert [t.id for t in assignable] == [a.id]
 
         # Complete A → B and C become assignable
-        for state in [TaskState.ASSIGNED, TaskState.IN_PROGRESS, TaskState.REVIEW, TaskState.APPROVED, TaskState.DONE]:
+        for state in [
+            TaskState.ASSIGNED,
+            TaskState.IN_PROGRESS,
+            TaskState.REVIEW,
+            TaskState.APPROVED,
+            TaskState.DONE,
+        ]:
             await tm.transition(a.id, state)
 
         assignable = await tm.get_assignable_tasks(project.id, limit=10)
@@ -835,14 +870,26 @@ class TestDependencyChains:
         assert d.id not in assignable_ids
 
         # Complete B → D still blocked (C not done)
-        for state in [TaskState.ASSIGNED, TaskState.IN_PROGRESS, TaskState.REVIEW, TaskState.APPROVED, TaskState.DONE]:
+        for state in [
+            TaskState.ASSIGNED,
+            TaskState.IN_PROGRESS,
+            TaskState.REVIEW,
+            TaskState.APPROVED,
+            TaskState.DONE,
+        ]:
             await tm.transition(b.id, state)
 
         assignable = await tm.get_assignable_tasks(project.id, limit=10)
         assert d.id not in {t.id for t in assignable}
 
         # Complete C → D finally assignable
-        for state in [TaskState.ASSIGNED, TaskState.IN_PROGRESS, TaskState.REVIEW, TaskState.APPROVED, TaskState.DONE]:
+        for state in [
+            TaskState.ASSIGNED,
+            TaskState.IN_PROGRESS,
+            TaskState.REVIEW,
+            TaskState.APPROVED,
+            TaskState.DONE,
+        ]:
             await tm.transition(c.id, state)
 
         assignable = await tm.get_assignable_tasks(project.id, limit=10)
@@ -860,8 +907,12 @@ class TestPauseResumeIntegration:
         project = await _create_project(db)
         agents = _build_agents(db=db, bus=bus, ollama=ollama, task_manager=tm)
         return {
-            "db": db, "bus": bus, "ollama": ollama, "tm": tm,
-            "project": project, "agents": agents,
+            "db": db,
+            "bus": bus,
+            "ollama": ollama,
+            "tm": tm,
+            "project": project,
+            "agents": agents,
         }
 
     @pytest.mark.asyncio
@@ -969,7 +1020,7 @@ class TestPipelineHealthIntegration:
 
         # Push updated_at far into the past via raw SQL (update_task always
         # sets updated_at=now, so we must bypass it).
-        old_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        old_time = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
         await db.db.execute(
             "UPDATE tasks SET updated_at = ? WHERE id = ?",
             (old_time, task.id),
@@ -991,7 +1042,7 @@ class TestPipelineHealthIntegration:
         """Pipeline health check fails a project that exceeded its token budget."""
         db = env["db"]
         bus: MockMessageBus = env["bus"]
-        tm: TaskManager = env["tm"]
+        env["tm"]
         pipeline: Pipeline = env["pipeline"]
         project: Project = env["project"]
 
@@ -1018,8 +1069,12 @@ class TestRetryIntegration:
         project = await _create_project(db)
         agents = _build_agents(db=db, bus=bus, ollama=ollama, task_manager=tm)
         return {
-            "db": db, "bus": bus, "ollama": ollama, "tm": tm,
-            "project": project, "agents": agents,
+            "db": db,
+            "bus": bus,
+            "ollama": ollama,
+            "tm": tm,
+            "project": project,
+            "agents": agents,
         }
 
     @pytest.mark.asyncio
@@ -1030,7 +1085,7 @@ class TestRetryIntegration:
         ollama: MockOllamaClient = env["ollama"]
         tm: TaskManager = env["tm"]
         project: Project = env["project"]
-        pm: PMAgent = env["agents"][AgentRole.PM]
+        env["agents"][AgentRole.PM]
         research: ResearchAgent = env["agents"][AgentRole.RESEARCH]
 
         task = await tm.create_task(
@@ -1103,17 +1158,29 @@ class TestMultiAgentConversationIsolation:
         research = ResearchAgent(bus=bus, ollama=ollama, db=db, task_manager=tm)
 
         # Create tasks for both projects
-        t1 = await tm.create_task(project_id=p1.id, title="Research A", description="Chat app research", assigned_to=AgentRole.RESEARCH)
-        t2 = await tm.create_task(project_id=p2.id, title="Research B", description="Todo app research", assigned_to=AgentRole.RESEARCH)
+        t1 = await tm.create_task(
+            project_id=p1.id,
+            title="Research A",
+            description="Chat app research",
+            assigned_to=AgentRole.RESEARCH,
+        )
+        t2 = await tm.create_task(
+            project_id=p2.id,
+            title="Research B",
+            description="Todo app research",
+            assigned_to=AgentRole.RESEARCH,
+        )
         await tm.transition(t1.id, TaskState.ASSIGNED)
         await tm.transition(t2.id, TaskState.ASSIGNED)
 
         # Process task for project A
         ollama.default_response = "Chat app research results"
         msg_a = make_message(
-            sender=AgentRole.PM, recipient=AgentRole.RESEARCH,
+            sender=AgentRole.PM,
+            recipient=AgentRole.RESEARCH,
             msg_type=MessageType.TASK_ASSIGNMENT,
-            project_id=p1.id, task_id=t1.id,
+            project_id=p1.id,
+            task_id=t1.id,
             content="Research chat app technologies",
         )
         await research._handle_message(msg_a)
@@ -1121,9 +1188,11 @@ class TestMultiAgentConversationIsolation:
         # Process task for project B
         ollama.default_response = "Todo app research results"
         msg_b = make_message(
-            sender=AgentRole.PM, recipient=AgentRole.RESEARCH,
+            sender=AgentRole.PM,
+            recipient=AgentRole.RESEARCH,
             msg_type=MessageType.TASK_ASSIGNMENT,
-            project_id=p2.id, task_id=t2.id,
+            project_id=p2.id,
+            task_id=t2.id,
             content="Research todo app technologies",
         )
         await research._handle_message(msg_b)
@@ -1153,15 +1222,19 @@ class TestMessagePersistence:
         project = await _create_project(db)
         agents = _build_agents(db=db, bus=bus, ollama=ollama, task_manager=tm)
         return {
-            "db": db, "bus": bus, "ollama": ollama, "tm": tm,
-            "project": project, "agents": agents,
+            "db": db,
+            "bus": bus,
+            "ollama": ollama,
+            "tm": tm,
+            "project": project,
+            "agents": agents,
         }
 
     @pytest.mark.asyncio
     async def test_messages_are_persisted(self, env):
         """Both incoming and outgoing messages are saved to the database."""
         db = env["db"]
-        bus: MockMessageBus = env["bus"]
+        env["bus"]
         ollama: MockOllamaClient = env["ollama"]
         tm: TaskManager = env["tm"]
         project: Project = env["project"]

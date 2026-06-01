@@ -11,14 +11,15 @@ Provides async database access with:
 
 from __future__ import annotations
 
+import contextlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
-import structlog
 
+import structlog
 from src.core.models import Artifact, Project, Task, TaskState
 
 logger = structlog.get_logger()
@@ -29,7 +30,7 @@ logger = structlog.get_logger()
 # ============================================================
 
 
-def _row_to_task(row: Any) -> Task:
+def _row_to_task(row: aiosqlite.Row) -> Task:
     """Convert a database row to a Task, deserializing JSON fields."""
     d = dict(row)
     # depends_on is stored as a JSON list in SQLite
@@ -44,9 +45,10 @@ def _row_to_task(row: Any) -> Task:
     return Task(**d)
 
 
-def _row_to_project(row: Any) -> Project:
+def _row_to_project(row: aiosqlite.Row) -> Project:
     """Convert a database row to a Project."""
     return Project(**dict(row))
+
 
 # ============================================================
 # Schema Versioning
@@ -126,7 +128,6 @@ MIGRATIONS: dict[int, str] = {
     CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
     CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
     """,
-
     # Version 2: Add project_events table for timeline tracking
     2: """
     CREATE TABLE IF NOT EXISTS project_events (
@@ -143,7 +144,6 @@ MIGRATIONS: dict[int, str] = {
     CREATE INDEX IF NOT EXISTS idx_events_project ON project_events(project_id);
     CREATE INDEX IF NOT EXISTS idx_events_type ON project_events(event_type);
     """,
-
     # Version 3: Task dependencies, token tracking
     3: """
     ALTER TABLE tasks ADD COLUMN depends_on TEXT DEFAULT '[]';
@@ -207,10 +207,8 @@ class Database:
         """Close the database connection gracefully."""
         if self._db:
             # Checkpoint WAL before closing for clean state
-            try:
+            with contextlib.suppress(Exception):
                 await self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            except Exception:
-                pass
             await self._db.close()
             self._db = None
             logger.info("database_closed")
@@ -229,9 +227,7 @@ class Database:
     async def _get_current_version(self) -> int:
         """Get the current schema version from the database."""
         try:
-            async with self.db.execute(
-                "SELECT MAX(version) as v FROM schema_version"
-            ) as cursor:
+            async with self.db.execute("SELECT MAX(version) as v FROM schema_version") as cursor:
                 row = await cursor.fetchone()
                 return row["v"] if row and row["v"] else 0
         except aiosqlite.OperationalError:
@@ -255,7 +251,7 @@ class Database:
             await self.db.executescript(sql)
             await self.db.execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                (version, datetime.now(timezone.utc).isoformat()),
+                (version, datetime.now(UTC).isoformat()),
             )
             await self.db.commit()
             logger.info("migration_applied", version=version)
@@ -271,9 +267,14 @@ class Database:
                 """INSERT INTO projects (id, name, description, created_at, updated_at, status, idea, tokens_used)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    project.id, project.name, project.description,
-                    project.created_at.isoformat(), project.updated_at.isoformat(),
-                    project.status, project.idea, project.tokens_used,
+                    project.id,
+                    project.name,
+                    project.description,
+                    project.created_at.isoformat(),
+                    project.updated_at.isoformat(),
+                    project.status,
+                    project.idea,
+                    project.tokens_used,
                 ),
             )
             await self.db.commit()
@@ -290,9 +291,7 @@ class Database:
 
     async def get_project(self, project_id: str) -> Project | None:
         """Get a project by ID."""
-        async with self.db.execute(
-            "SELECT * FROM projects WHERE id = ?", (project_id,)
-        ) as cursor:
+        async with self.db.execute("SELECT * FROM projects WHERE id = ?", (project_id,)) as cursor:
             row = await cursor.fetchone()
             if row:
                 return Project(**dict(row))
@@ -303,7 +302,9 @@ class Database:
     ) -> list[Project]:
         """List projects with optional status filter and pagination."""
         if status:
-            query = "SELECT * FROM projects WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            query = (
+                "SELECT * FROM projects WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            )
             params: tuple = (status, limit, offset)
         else:
             query = "SELECT * FROM projects ORDER BY created_at DESC LIMIT ? OFFSET ?"
@@ -312,7 +313,7 @@ class Database:
             rows = await cursor.fetchall()
             return [Project(**dict(row)) for row in rows]
 
-    async def update_project(self, project_id: str, **fields: Any) -> None:
+    async def update_project(self, project_id: str, **fields: object) -> None:
         """Update specific fields on a project.
 
         Only fields in the ``_ALLOWED_PROJECT_UPDATES`` set are accepted;
@@ -327,7 +328,7 @@ class Database:
         # Safety assertion: field names MUST come from the static allowlist
         assert all(k in allowed for k in updates), "BUG: disallowed field in update"
 
-        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        updates["updated_at"] = datetime.now(UTC).isoformat()
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [project_id]
 
@@ -339,8 +340,7 @@ class Database:
 
         if "status" in updates:
             await self._record_event(
-                project_id, "status_changed",
-                description=f"Status changed to '{updates['status']}'"
+                project_id, "status_changed", description=f"Status changed to '{updates['status']}'"
             )
 
     async def delete_project(self, project_id: str) -> bool:
@@ -379,18 +379,29 @@ class Database:
                     depends_on, tokens_used)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    task.id, task.project_id, task.title, task.description,
-                    task.state.value, task.assigned_to.value if task.assigned_to else None,
-                    task.created_at.isoformat(), task.updated_at.isoformat(),
-                    task.iteration, task.max_iterations, task.parent_task_id,
-                    task.deliverable, task.feedback, task.priority.value,
-                    json.dumps(task.depends_on), task.tokens_used,
+                    task.id,
+                    task.project_id,
+                    task.title,
+                    task.description,
+                    task.state.value,
+                    task.assigned_to.value if task.assigned_to else None,
+                    task.created_at.isoformat(),
+                    task.updated_at.isoformat(),
+                    task.iteration,
+                    task.max_iterations,
+                    task.parent_task_id,
+                    task.deliverable,
+                    task.feedback,
+                    task.priority.value,
+                    json.dumps(task.depends_on),
+                    task.tokens_used,
                 ),
             )
             await self.db.commit()
 
             await self._record_event(
-                task.project_id, "task_created",
+                task.project_id,
+                "task_created",
                 agent=task.assigned_to.value if task.assigned_to else None,
                 description=f"Task '{task.title}' created",
             )
@@ -402,9 +413,7 @@ class Database:
 
     async def get_task(self, task_id: str) -> Task | None:
         """Get a task by ID."""
-        async with self.db.execute(
-            "SELECT * FROM tasks WHERE id = ?", (task_id,)
-        ) as cursor:
+        async with self.db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)) as cursor:
             row = await cursor.fetchone()
             if row:
                 return _row_to_task(row)
@@ -433,7 +442,7 @@ class Database:
         params.extend([limit, offset])
 
         async with self.db.execute(
-            f"SELECT * FROM tasks WHERE {where} ORDER BY created_at LIMIT ? OFFSET ?",
+            f"SELECT * FROM tasks WHERE {where} ORDER BY created_at LIMIT ? OFFSET ?",  # noqa: S608
             params,
         ) as cursor:
             rows = await cursor.fetchall()
@@ -451,10 +460,15 @@ class Database:
             (
                 task.state.value,
                 task.assigned_to.value if task.assigned_to else None,
-                datetime.now(timezone.utc).isoformat(),
-                task.iteration, task.deliverable, task.feedback,
-                task.title, task.description, task.priority.value,
-                json.dumps(task.depends_on), task.tokens_used,
+                datetime.now(UTC).isoformat(),
+                task.iteration,
+                task.deliverable,
+                task.feedback,
+                task.title,
+                task.description,
+                task.priority.value,
+                json.dumps(task.depends_on),
+                task.tokens_used,
                 task.id,
             ),
         )
@@ -464,7 +478,7 @@ class Database:
         """Update only the task state (lightweight update)."""
         await self.db.execute(
             "UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?",
-            (state.value, datetime.now(timezone.utc).isoformat(), task_id),
+            (state.value, datetime.now(UTC).isoformat(), task_id),
         )
         await self.db.commit()
 
@@ -514,16 +528,22 @@ class Database:
                     artifact_type, created_at, version)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    artifact.id, artifact.project_id, artifact.task_id,
-                    artifact.agent.value, artifact.filename, artifact.content,
-                    artifact.artifact_type, artifact.created_at.isoformat(),
+                    artifact.id,
+                    artifact.project_id,
+                    artifact.task_id,
+                    artifact.agent.value,
+                    artifact.filename,
+                    artifact.content,
+                    artifact.artifact_type,
+                    artifact.created_at.isoformat(),
                     artifact.version,
                 ),
             )
             await self.db.commit()
 
             await self._record_event(
-                artifact.project_id, "artifact_created",
+                artifact.project_id,
+                "artifact_created",
                 agent=artifact.agent.value,
                 description=f"Artifact '{artifact.filename}' ({artifact.artifact_type}) created",
             )
@@ -566,15 +586,13 @@ class Database:
         params.extend([limit, offset])
 
         async with self.db.execute(
-            f"SELECT * FROM artifacts WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            f"SELECT * FROM artifacts WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",  # noqa: S608
             params,
         ) as cursor:
             rows = await cursor.fetchall()
             return [Artifact(**dict(row)) for row in rows]
 
-    async def get_latest_artifact(
-        self, project_id: str, filename: str
-    ) -> Artifact | None:
+    async def get_latest_artifact(self, project_id: str, filename: str) -> Artifact | None:
         """Get the latest version of an artifact by filename."""
         async with self.db.execute(
             """SELECT * FROM artifacts
@@ -617,10 +635,15 @@ class Database:
                     project_id, task_id, payload, priority)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    msg["id"], msg["timestamp"], str(msg["sender"]),
-                    str(msg["recipient"]), str(msg["type"]),
-                    msg["project_id"], msg.get("task_id", ""),
-                    payload, msg.get("priority", "normal"),
+                    msg["id"],
+                    msg["timestamp"],
+                    str(msg["sender"]),
+                    str(msg["recipient"]),
+                    str(msg["type"]),
+                    msg["project_id"],
+                    msg.get("task_id", ""),
+                    payload,
+                    msg.get("priority", "normal"),
                 ),
             )
             await self.db.commit()
@@ -650,7 +673,7 @@ class Database:
         params.extend([limit, offset])
 
         async with self.db.execute(
-            f"SELECT * FROM messages WHERE {where} ORDER BY timestamp LIMIT ? OFFSET ?",
+            f"SELECT * FROM messages WHERE {where} ORDER BY timestamp LIMIT ? OFFSET ?",  # noqa: S608
             params,
         ) as cursor:
             rows = await cursor.fetchall()
@@ -693,18 +716,19 @@ class Database:
                    (project_id, event_type, agent, description, metadata, created_at)
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (
-                    project_id, event_type, agent, description,
+                    project_id,
+                    event_type,
+                    agent,
+                    description,
                     json.dumps(metadata or {}, default=str),
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(UTC).isoformat(),
                 ),
             )
             await self.db.commit()
         except aiosqlite.Error as e:
             logger.debug("event_recording_failed", error=str(e))
 
-    async def get_project_timeline(
-        self, project_id: str, limit: int = 100
-    ) -> list[dict[str, Any]]:
+    async def get_project_timeline(self, project_id: str, limit: int = 100) -> list[dict[str, Any]]:
         """Get the event timeline for a project."""
         async with self.db.execute(
             """SELECT * FROM project_events

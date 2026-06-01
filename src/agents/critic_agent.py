@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import structlog
-
 from src.agents.base_agent import BaseAgent
 from src.core.database import Database
 from src.core.message_bus import MessageBus
@@ -11,7 +10,6 @@ from src.core.models import (
     AgentMessage,
     AgentRole,
     MessageType,
-    TaskState,
 )
 from src.core.ollama_client import OllamaClient
 
@@ -36,7 +34,9 @@ class CriticAgent(BaseAgent):
         db: Database,
         task_manager: object | None = None,
     ) -> None:
-        super().__init__(role=AgentRole.CRITIC, bus=bus, ollama=ollama, db=db, task_manager=task_manager)
+        super().__init__(
+            role=AgentRole.CRITIC, bus=bus, ollama=ollama, db=db, task_manager=task_manager
+        )
 
     async def process_message(self, message: AgentMessage) -> AgentMessage | None:
         """Handle incoming messages."""
@@ -101,7 +101,9 @@ Then provide:
 
 Be constructive but thorough. Do not approve work that has critical or major issues."""
 
-        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.3)
+        response = await self.think(
+            prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.3
+        )
 
         # Determine if approved or needs revision.
         # Check the first few lines for the verdict (LLMs may add a short preamble).
@@ -148,7 +150,9 @@ Be constructive but thorough. Do not approve work that has critical or major iss
 
 Clarify your feedback with specific examples and suggestions."""
 
-        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.4)
+        response = await self.think(
+            prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.4
+        )
 
         return self.create_message(
             recipient=message.sender,

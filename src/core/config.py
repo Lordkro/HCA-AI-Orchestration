@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///data/hca.db"
 
     # --- Web UI ---
-    web_host: str = "0.0.0.0"
+    web_host: str = "0.0.0.0"  # noqa: S104 - Docker service must bind externally.
     web_port: int = 8080
 
     # --- Orchestration Limits ---

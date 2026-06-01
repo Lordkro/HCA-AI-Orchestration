@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import structlog
-
 from src.agents.base_agent import BaseAgent
 from src.core.database import Database
 from src.core.message_bus import MessageBus
@@ -36,7 +35,9 @@ class SpecAgent(BaseAgent):
         db: Database,
         task_manager: object | None = None,
     ) -> None:
-        super().__init__(role=AgentRole.SPEC, bus=bus, ollama=ollama, db=db, task_manager=task_manager)
+        super().__init__(
+            role=AgentRole.SPEC, bus=bus, ollama=ollama, db=db, task_manager=task_manager
+        )
 
     async def process_message(self, message: AgentMessage) -> AgentMessage | None:
         """Handle incoming messages."""
@@ -98,7 +99,9 @@ Be extremely specific. The Coder agent will implement directly from this spec.
 Use code blocks for schemas, API definitions, and file structures.
 Do NOT write the actual implementation code — only the specification."""
 
-        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.5)
+        response = await self.think(
+            prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.5
+        )
 
         return self.create_message(
             recipient=AgentRole.PM,
@@ -119,7 +122,9 @@ FEEDBACK:
 
 Please revise the specification to address all feedback points. Output the complete updated specification."""
 
-        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.5)
+        response = await self.think(
+            prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.5
+        )
 
         return self.create_message(
             recipient=AgentRole.PM,
@@ -139,7 +144,9 @@ Please revise the specification to address all feedback points. Output the compl
 
 Provide a clear, detailed answer referencing the relevant parts of the spec."""
 
-        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.5)
+        response = await self.think(
+            prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.5
+        )
 
         return self.create_message(
             recipient=message.sender,

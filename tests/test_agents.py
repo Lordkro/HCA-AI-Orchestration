@@ -19,8 +19,6 @@ no real Ollama or Redis required.
 
 from __future__ import annotations
 
-import asyncio
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -36,16 +34,12 @@ from src.core.models import (
     AgentMessage,
     AgentRole,
     AgentStatus,
-    MessagePayload,
     MessageType,
-    Priority,
     Project,
-    Task,
     TaskState,
 )
 from src.orchestrator.task_manager import TaskManager
 from tests.conftest import MockMessageBus, MockOllamaClient, make_message
-
 
 # ============================================================
 # Concrete test agent
@@ -134,14 +128,15 @@ class TestBaseAgentLifecycle:
 
     async def test_reload_prompt(self, db, mock_bus, mock_ollama, tmp_path) -> None:
         agent = StubAgent(bus=mock_bus, ollama=mock_ollama, db=db)
-        original = agent._system_prompt
 
         # Patch prompt path to a temp file
         custom_prompt = "You are a test agent."
         prompt_file = tmp_path / "pm.txt"
         prompt_file.write_text(custom_prompt, encoding="utf-8")
 
-        with patch.object(type(agent), "_prompt_path", new_callable=lambda: property(lambda self: prompt_file)):
+        with patch.object(
+            type(agent), "_prompt_path", new_callable=lambda: property(lambda self: prompt_file)
+        ):
             agent.reload_prompt()
             assert agent._system_prompt == custom_prompt
 
@@ -569,9 +564,7 @@ class TestAgentTaskTransitions:
         )
         await tm.transition(task.id, TaskState.ASSIGNED)
 
-        agent = ResearchAgent(
-            bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm
-        )
+        agent = ResearchAgent(bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm)
         msg = make_message(
             sender=AgentRole.PM,
             recipient=AgentRole.RESEARCH,
@@ -598,9 +591,7 @@ class TestAgentTaskTransitions:
         )
         await tm.transition(task.id, TaskState.ASSIGNED)
 
-        agent = SpecAgent(
-            bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm
-        )
+        agent = SpecAgent(bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm)
         msg = make_message(
             sender=AgentRole.PM,
             recipient=AgentRole.SPEC,
@@ -627,9 +618,7 @@ class TestAgentTaskTransitions:
         )
         await tm.transition(task.id, TaskState.ASSIGNED)
 
-        agent = CoderAgent(
-            bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm
-        )
+        agent = CoderAgent(bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm)
         msg = make_message(
             sender=AgentRole.PM,
             recipient=AgentRole.CODER,
@@ -878,9 +867,7 @@ class TestBaseTransitionHelper:
             description="",
             assigned_to=AgentRole.RESEARCH,
         )
-        agent = ResearchAgent(
-            bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm
-        )
+        agent = ResearchAgent(bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm)
         ok = await agent._transition_task(task.id, TaskState.ASSIGNED)
         assert ok is True
         updated = await db.get_task(task.id)
@@ -896,9 +883,7 @@ class TestBaseTransitionHelper:
             title="Test",
             description="",
         )
-        agent = ResearchAgent(
-            bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm
-        )
+        agent = ResearchAgent(bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm)
         # PENDING → IN_PROGRESS is invalid (must go through ASSIGNED first)
         ok = await agent._transition_task(task.id, TaskState.IN_PROGRESS)
         assert ok is False
@@ -914,8 +899,6 @@ class TestBaseTransitionHelper:
         self, db: Database, mock_bus: MockMessageBus, mock_ollama: MockOllamaClient
     ) -> None:
         tm = TaskManager(db=db, bus=mock_bus)
-        agent = ResearchAgent(
-            bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm
-        )
+        agent = ResearchAgent(bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm)
         ok = await agent._transition_task("", TaskState.ASSIGNED)
         assert ok is False

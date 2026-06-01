@@ -8,11 +8,8 @@ All tests run fully offline — no Ollama server, no Redis required.
 
 from __future__ import annotations
 
-import asyncio
-import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -24,7 +21,6 @@ from src.core.models import (
     MessageType,
     Priority,
 )
-
 
 # ============================================================
 # Database Fixture (real SQLite in temp dir)
@@ -72,12 +68,14 @@ class MockOllamaClient:
         max_tokens: int = 4096,
         auto_trim: bool = False,
     ) -> str:
-        self.chat_calls.append({
-            "messages": messages,
-            "model": model,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        })
+        self.chat_calls.append(
+            {
+                "messages": messages,
+                "model": model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+        )
         return self.default_response
 
     async def generate(self, prompt: str, **kwargs: Any) -> str:

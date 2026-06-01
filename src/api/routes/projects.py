@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 from src.core.models import (
     AgentMessage,
@@ -18,6 +18,7 @@ router = APIRouter()
 
 class CreateProjectRequest(BaseModel):
     """Request body for creating a new project."""
+
     idea: str
     name: str = ""
 
@@ -45,7 +46,11 @@ async def create_project(req: CreateProjectRequest, request: Request) -> dict:
     )
     await bus.publish(msg)
 
-    return {"project_id": project.id, "status": "created", "message": "Project submitted to PM agent"}
+    return {
+        "project_id": project.id,
+        "status": "created",
+        "message": "Project submitted to PM agent",
+    }
 
 
 @router.get("/", response_model=list[dict])

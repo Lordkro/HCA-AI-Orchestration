@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable, Coroutine
+from datetime import UTC, datetime
+from typing import Any
 
 import redis.asyncio as aioredis
-import structlog
 
+import structlog
 from src.core.models import AgentMessage, AgentRole
 
 logger = structlog.get_logger()
@@ -29,15 +30,15 @@ logger = structlog.get_logger()
 # Stream & Group Names
 # ============================================================
 
-AGENT_STREAM = "hca:agents:{agent}"        # Per-agent inbox
-BROADCAST_STREAM = "hca:broadcast"           # Broadcast messages
-EVENT_STREAM = "hca:events"                  # UI event stream
-DEAD_LETTER_STREAM = "hca:deadletter"        # Failed messages
+AGENT_STREAM = "hca:agents:{agent}"  # Per-agent inbox
+BROADCAST_STREAM = "hca:broadcast"  # Broadcast messages
+EVENT_STREAM = "hca:events"  # UI event stream
+DEAD_LETTER_STREAM = "hca:deadletter"  # Failed messages
 
-CONSUMER_GROUP = "hca-workers"               # Consumer group name
-MAX_STREAM_LEN = 5000                        # Max entries per stream
-MAX_EVENT_STREAM_LEN = 2000                  # Max entries in event stream
-MAX_DELIVERY_ATTEMPTS = 3                    # Before moving to dead letter
+CONSUMER_GROUP = "hca-workers"  # Consumer group name
+MAX_STREAM_LEN = 5000  # Max entries per stream
+MAX_EVENT_STREAM_LEN = 2000  # Max entries in event stream
+MAX_DELIVERY_ATTEMPTS = 3  # Before moving to dead letter
 
 CallbackType = Callable[[AgentMessage], Coroutine[Any, Any, None]]
 
@@ -46,9 +47,11 @@ CallbackType = Callable[[AgentMessage], Coroutine[Any, Any, None]]
 # Statistics
 # ============================================================
 
+
 @dataclass
 class BusStats:
     """Cumulative statistics for the message bus."""
+
     messages_published: int = 0
     messages_consumed: int = 0
     messages_acknowledged: int = 0
@@ -172,7 +175,7 @@ class MessageBus:
         """Publish a message to the recipient's stream.
 
         Messages are written to:
-        1. The recipient's personal inbox stream (or broadcast)
+        1. The recipient's personal inbox stream
         2. The event stream (for UI consumption, capped)
         3. The pub/sub channel (for real-time WebSocket push)
 
@@ -183,20 +186,21 @@ class MessageBus:
         data = message.model_dump(mode="json")
         serialized = json.dumps(data, default=str)
 
-        # Determine target stream
-        if message.recipient == "*":
-            stream = BROADCAST_STREAM
-        else:
-            recipient = message.recipient
-            if isinstance(recipient, AgentRole):
-                recipient = recipient.value
-            stream = AGENT_STREAM.format(agent=recipient)
+        streams = self._target_streams(message)
 
         try:
-            # 1. Write to recipient's inbox
-            msg_id = await self.redis.xadd(
-                stream, {"data": serialized}, maxlen=self.max_stream_len
-            )
+            # 1. Write to recipient inbox(es). Broadcast copies must go to
+            # each inbox; one shared Redis consumer group on a single stream
+            # would deliver the message to only one agent.
+            msg_ids = []
+            for stream in streams:
+                msg_ids.append(
+                    await self.redis.xadd(
+                        stream,
+                        {"data": serialized},
+                        maxlen=self.max_stream_len,
+                    )
+                )
 
             # 2. Write to event stream (for UI history)
             await self.redis.xadd(
@@ -208,7 +212,8 @@ class MessageBus:
             # 3. Pub/sub push for real-time WebSocket
             await self.redis.publish("hca:notifications", serialized)
 
-            self.stats.record_publish(message.type.value if hasattr(message.type, 'value') else str(message.type))
+            msg_type = message.type.value if hasattr(message.type, "value") else str(message.type)
+            self.stats.record_publish(msg_type)
 
             logger.debug(
                 "message_published",
@@ -216,15 +221,30 @@ class MessageBus:
                 sender=str(message.sender),
                 recipient=str(message.recipient),
                 type=str(message.type),
-                stream=stream,
-                redis_id=msg_id,
+                streams=streams,
+                redis_id=msg_ids[0] if msg_ids else "",
             )
-            return str(msg_id)
+            return str(msg_ids[0])
 
         except (aioredis.ConnectionError, aioredis.TimeoutError) as e:
             self.stats.publish_errors += 1
             logger.error("message_publish_failed", error=str(e), msg_id=message.id)
             raise MessageBusError(f"Failed to publish message: {e}") from e
+
+    @staticmethod
+    def _target_streams(message: AgentMessage) -> list[str]:
+        """Return the Redis stream(s) that should receive an agent message."""
+        if message.recipient == "*":
+            return [
+                AGENT_STREAM.format(agent=role.value)
+                for role in AgentRole
+                if role not in (AgentRole.SYSTEM, AgentRole.USER)
+            ]
+
+        recipient = message.recipient
+        if isinstance(recipient, AgentRole):
+            recipient = recipient.value
+        return [AGENT_STREAM.format(agent=recipient)]
 
     # --------------------------------------------------------
     # Consuming (Consumer Group based)
@@ -329,8 +349,11 @@ class MessageBus:
         try:
             # XAUTOCLAIM returns (next_start_id, claimed_entries, deleted_ids)
             result = await self.redis.xautoclaim(
-                inbox_stream, CONSUMER_GROUP, consumer,
-                min_idle_time=min_idle_ms, count=count,
+                inbox_stream,
+                CONSUMER_GROUP,
+                consumer,
+                min_idle_time=min_idle_ms,
+                count=count,
             )
             if result and len(result) >= 2:
                 claimed_entries = result[1]
@@ -369,7 +392,7 @@ class MessageBus:
             "original_entry_id": entry_id,
             "reason": reason,
             "data": json.dumps(message.model_dump(mode="json"), default=str),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
         await self.redis.xadd(DEAD_LETTER_STREAM, dead_letter_data, maxlen=1000)
         await self.acknowledge(original_stream, entry_id)
@@ -430,7 +453,7 @@ class MessageBus:
         event = {
             "type": event_type,
             "data": json.dumps(data, default=str),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
         await self.redis.xadd(EVENT_STREAM, event, maxlen=MAX_EVENT_STREAM_LEN)
         await self.redis.publish("hca:notifications", json.dumps(event, default=str))

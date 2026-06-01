@@ -10,10 +10,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from src.api.app import create_app
-from src.core.models import AgentRole, Project, Task, TaskState
-
+from src.core.models import AgentRole, Task, TaskState
 from tests.conftest import MockMessageBus, MockOllamaClient
-
 
 # ============================================================
 # Helpers
@@ -314,6 +312,16 @@ class TestTasks:
         assert len(r.json()) == 1
         r2 = await ac.get(f"/api/tasks/{pid}?state=done")
         assert len(r2.json()) == 0
+
+    @pytest.mark.asyncio
+    async def test_list_tasks_invalid_state(self, client, db):
+        ac, _ = client
+        pid, _ = await self._setup_project_with_task(ac, db)
+
+        r = await ac.get(f"/api/tasks/{pid}?state=definitely-not-a-state")
+
+        assert r.status_code == 400
+        assert "Invalid task state" in r.json()["detail"]
 
     @pytest.mark.asyncio
     async def test_get_task_detail(self, client, db):

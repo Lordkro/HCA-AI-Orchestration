@@ -12,9 +12,8 @@ import pytest
 from src.core.database import Database
 from src.core.models import AgentRole, Project, Task, TaskState
 from src.orchestrator.guardrails import Guardrails
-from src.orchestrator.task_manager import TaskManager, VALID_TRANSITIONS
+from src.orchestrator.task_manager import VALID_TRANSITIONS, TaskManager
 from tests.conftest import MockMessageBus
-
 
 # ============================================================
 # Helpers
@@ -124,9 +123,7 @@ class TestTransition:
         result = await tm.transition(task.id, TaskState.REVIEW)
         assert result.state == TaskState.REVIEW
 
-    async def test_invalid_transition_raises(
-        self, db: Database, mock_bus: MockMessageBus
-    ) -> None:
+    async def test_invalid_transition_raises(self, db: Database, mock_bus: MockMessageBus) -> None:
         _, task = await _make_project_and_task(db, TaskState.PENDING)
         tm = TaskManager(db=db, bus=mock_bus)
 
@@ -153,9 +150,7 @@ class TestTransition:
         self, db: Database, mock_bus: MockMessageBus
     ) -> None:
         """When iteration count reaches max_iterations, task should be FAILED."""
-        _, task = await _make_project_and_task(
-            db, TaskState.REVIEW, max_iterations=1
-        )
+        _, task = await _make_project_and_task(db, TaskState.REVIEW, max_iterations=1)
         # Set iteration to max_iterations - 1 so the next revision hits the limit
         task.iteration = 0
         await db.update_task(task)
@@ -164,11 +159,11 @@ class TestTransition:
         result = await tm.transition(task.id, TaskState.REVISION)
         # iteration becomes 1, which equals max_iterations (1), so FAILED
         assert result.state == TaskState.FAILED
-        assert "Guardrail" in (result.feedback or "") or "maximum" in (result.feedback or "").lower()
+        assert (
+            "Guardrail" in (result.feedback or "") or "maximum" in (result.feedback or "").lower()
+        )
 
-    async def test_full_happy_path(
-        self, db: Database, mock_bus: MockMessageBus
-    ) -> None:
+    async def test_full_happy_path(self, db: Database, mock_bus: MockMessageBus) -> None:
         """Walk through the full pipeline: pending → assigned → in_progress → review → approved → done."""
         _, task = await _make_project_and_task(db, TaskState.PENDING)
         tm = TaskManager(db=db, bus=mock_bus)
@@ -188,9 +183,7 @@ class TestTransition:
         task = await tm.transition(task.id, TaskState.DONE)
         assert task.state == TaskState.DONE
 
-    async def test_revision_loop_path(
-        self, db: Database, mock_bus: MockMessageBus
-    ) -> None:
+    async def test_revision_loop_path(self, db: Database, mock_bus: MockMessageBus) -> None:
         """Test the revision loop: review → revision → in_progress → review."""
         _, task = await _make_project_and_task(db, TaskState.REVIEW, max_iterations=5)
         tm = TaskManager(db=db, bus=mock_bus)
@@ -205,9 +198,7 @@ class TestTransition:
         task = await tm.transition(task.id, TaskState.REVIEW)
         assert task.state == TaskState.REVIEW
 
-    async def test_failed_can_retry(
-        self, db: Database, mock_bus: MockMessageBus
-    ) -> None:
+    async def test_failed_can_retry(self, db: Database, mock_bus: MockMessageBus) -> None:
         """A failed task can be retried (failed → pending)."""
         _, task = await _make_project_and_task(db, TaskState.FAILED)
         tm = TaskManager(db=db, bus=mock_bus)
@@ -224,9 +215,7 @@ class TestTransition:
 class TestProjectProgress:
     """Tests for progress reporting."""
 
-    async def test_progress_empty_project(
-        self, db: Database, mock_bus: MockMessageBus
-    ) -> None:
+    async def test_progress_empty_project(self, db: Database, mock_bus: MockMessageBus) -> None:
         p = Project(name="Empty", description="", idea="x")
         await db.create_project(p)
         tm = TaskManager(db=db, bus=mock_bus)
@@ -235,9 +224,7 @@ class TestProjectProgress:
         assert progress["total_tasks"] == 0
         assert progress["progress_pct"] == 0
 
-    async def test_progress_with_tasks(
-        self, db: Database, mock_bus: MockMessageBus
-    ) -> None:
+    async def test_progress_with_tasks(self, db: Database, mock_bus: MockMessageBus) -> None:
         p = Project(name="Prog", description="", idea="x")
         await db.create_project(p)
 
@@ -294,16 +281,22 @@ class TestGuardrails:
     def test_should_allow_revision_yes(self) -> None:
         g = Guardrails(max_iterations=5, task_timeout=999)
         task = Task(
-            project_id="p", title="t", description="",
-            iteration=2, max_iterations=5,
+            project_id="p",
+            title="t",
+            description="",
+            iteration=2,
+            max_iterations=5,
         )
         assert g.should_allow_revision(task) is True
 
     def test_should_allow_revision_no(self) -> None:
         g = Guardrails(max_iterations=5, task_timeout=999)
         task = Task(
-            project_id="p", title="t", description="",
-            iteration=5, max_iterations=5,
+            project_id="p",
+            title="t",
+            description="",
+            iteration=5,
+            max_iterations=5,
         )
         assert g.should_allow_revision(task) is False
 
@@ -316,9 +309,7 @@ class TestGuardrails:
 class TestTaskCountGuardrail:
     """Tests that create_task enforces the per-project task limit."""
 
-    async def test_create_task_within_limit(
-        self, db: Database, mock_bus: MockMessageBus
-    ) -> None:
+    async def test_create_task_within_limit(self, db: Database, mock_bus: MockMessageBus) -> None:
         p = Project(name="GL", description="", idea="x")
         await db.create_project(p)
         g = Guardrails(max_tasks=3)
@@ -329,9 +320,7 @@ class TestTaskCountGuardrail:
         await tm.create_task(project_id=p.id, title="T2", description="")
         await tm.create_task(project_id=p.id, title="T3", description="")
 
-    async def test_create_task_exceeds_limit(
-        self, db: Database, mock_bus: MockMessageBus
-    ) -> None:
+    async def test_create_task_exceeds_limit(self, db: Database, mock_bus: MockMessageBus) -> None:
         p = Project(name="GL", description="", idea="x")
         await db.create_project(p)
         g = Guardrails(max_tasks=2)

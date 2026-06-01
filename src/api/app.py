@@ -36,8 +36,8 @@ def create_app(
     app.state.agents = agents
 
     # Register route modules
-    from src.api.routes.projects import router as projects_router
     from src.api.routes.agents import router as agents_router
+    from src.api.routes.projects import router as projects_router
     from src.api.routes.tasks import router as tasks_router
     from src.api.routes.websocket import router as ws_router
 

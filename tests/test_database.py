@@ -9,16 +9,14 @@ from __future__ import annotations
 
 import pytest
 
-from src.core.database import Database, DatabaseError, CURRENT_SCHEMA_VERSION
+from src.core.database import CURRENT_SCHEMA_VERSION, Database, DatabaseError
 from src.core.models import (
     AgentRole,
     Artifact,
-    Priority,
     Project,
     Task,
     TaskState,
 )
-
 
 # ============================================================
 # Migrations & Init
@@ -98,9 +96,7 @@ class TestProjects:
 
     async def test_list_projects_pagination(self, db: Database) -> None:
         for i in range(5):
-            await db.create_project(
-                Project(name=f"P{i}", description="", idea=f"idea {i}")
-            )
+            await db.create_project(Project(name=f"P{i}", description="", idea=f"idea {i}"))
         page1 = await db.list_projects(limit=2, offset=0)
         page2 = await db.list_projects(limit=2, offset=2)
         assert len(page1) == 2
@@ -150,9 +146,7 @@ class TestProjects:
     async def test_count_projects(self, db: Database) -> None:
         assert await db.count_projects() == 0
         await db.create_project(Project(name="A", description="", idea="a"))
-        await db.create_project(
-            Project(name="B", description="", idea="b", status="completed")
-        )
+        await db.create_project(Project(name="B", description="", idea="b", status="completed"))
         assert await db.count_projects() == 2
         assert await db.count_projects(status="active") == 1
         assert await db.count_projects(status="completed") == 1
@@ -201,11 +195,15 @@ class TestTasks:
     async def test_list_tasks_by_assigned_to(self, db: Database) -> None:
         project = await self._make_project(db)
         t1 = Task(
-            project_id=project.id, title="T1", description="",
+            project_id=project.id,
+            title="T1",
+            description="",
             assigned_to=AgentRole.CODER,
         )
         t2 = Task(
-            project_id=project.id, title="T2", description="",
+            project_id=project.id,
+            title="T2",
+            description="",
             assigned_to=AgentRole.RESEARCH,
         )
         await db.create_task(t1)
@@ -268,8 +266,11 @@ class TestArtifacts:
     async def test_create_and_get_artifact(self, db: Database) -> None:
         p, t = await self._setup(db)
         artifact = Artifact(
-            project_id=p.id, task_id=t.id, agent=AgentRole.CODER,
-            filename="main.py", content="print('hello')",
+            project_id=p.id,
+            task_id=t.id,
+            agent=AgentRole.CODER,
+            filename="main.py",
+            content="print('hello')",
             artifact_type="code",
         )
         await db.create_artifact(artifact)
@@ -284,12 +285,20 @@ class TestArtifacts:
     async def test_list_artifacts_by_type(self, db: Database) -> None:
         p, t = await self._setup(db)
         a1 = Artifact(
-            project_id=p.id, task_id=t.id, agent=AgentRole.CODER,
-            filename="app.py", content="code", artifact_type="code",
+            project_id=p.id,
+            task_id=t.id,
+            agent=AgentRole.CODER,
+            filename="app.py",
+            content="code",
+            artifact_type="code",
         )
         a2 = Artifact(
-            project_id=p.id, task_id=t.id, agent=AgentRole.SPEC,
-            filename="spec.md", content="spec", artifact_type="doc",
+            project_id=p.id,
+            task_id=t.id,
+            agent=AgentRole.SPEC,
+            filename="spec.md",
+            content="spec",
+            artifact_type="doc",
         )
         await db.create_artifact(a1)
         await db.create_artifact(a2)
@@ -301,12 +310,22 @@ class TestArtifacts:
     async def test_get_latest_artifact(self, db: Database) -> None:
         p, t = await self._setup(db)
         v1 = Artifact(
-            project_id=p.id, task_id=t.id, agent=AgentRole.CODER,
-            filename="main.py", content="v1", artifact_type="code", version=1,
+            project_id=p.id,
+            task_id=t.id,
+            agent=AgentRole.CODER,
+            filename="main.py",
+            content="v1",
+            artifact_type="code",
+            version=1,
         )
         v2 = Artifact(
-            project_id=p.id, task_id=t.id, agent=AgentRole.CODER,
-            filename="main.py", content="v2", artifact_type="code", version=2,
+            project_id=p.id,
+            task_id=t.id,
+            agent=AgentRole.CODER,
+            filename="main.py",
+            content="v2",
+            artifact_type="code",
+            version=2,
         )
         await db.create_artifact(v1)
         await db.create_artifact(v2)
@@ -319,10 +338,16 @@ class TestArtifacts:
     async def test_count_artifacts(self, db: Database) -> None:
         p, t = await self._setup(db)
         assert await db.count_artifacts(p.id) == 0
-        await db.create_artifact(Artifact(
-            project_id=p.id, task_id=t.id, agent=AgentRole.CODER,
-            filename="f.py", content="x", artifact_type="code",
-        ))
+        await db.create_artifact(
+            Artifact(
+                project_id=p.id,
+                task_id=t.id,
+                agent=AgentRole.CODER,
+                filename="f.py",
+                content="x",
+                artifact_type="code",
+            )
+        )
         assert await db.count_artifacts(p.id) == 1
 
 
@@ -370,24 +395,32 @@ class TestMessages:
     async def test_get_messages_with_sender_filter(self, db: Database) -> None:
         senders = [("pm", "msg-pm-1"), ("coder", "msg-coder-1"), ("pm", "msg-pm-2")]
         for sender, msg_id in senders:
-            await db.save_message({
-                "id": msg_id,
-                "timestamp": "2024-01-01T00:00:00Z",
-                "sender": sender,
-                "recipient": "critic",
-                "type": "deliverable",
-                "project_id": "proj-1",
-                "payload": "content",
-            })
+            await db.save_message(
+                {
+                    "id": msg_id,
+                    "timestamp": "2024-01-01T00:00:00Z",
+                    "sender": sender,
+                    "recipient": "critic",
+                    "type": "deliverable",
+                    "project_id": "proj-1",
+                    "payload": "content",
+                }
+            )
         pm_msgs = await db.get_project_messages("proj-1", sender="pm")
         assert len(pm_msgs) == 2
 
     async def test_count_messages(self, db: Database) -> None:
-        await db.save_message({
-            "id": "m1", "timestamp": "2024-01-01T00:00:00Z",
-            "sender": "pm", "recipient": "coder", "type": "task_assignment",
-            "project_id": "proj-1", "payload": "x",
-        })
+        await db.save_message(
+            {
+                "id": "m1",
+                "timestamp": "2024-01-01T00:00:00Z",
+                "sender": "pm",
+                "recipient": "coder",
+                "type": "task_assignment",
+                "project_id": "proj-1",
+                "payload": "x",
+            }
+        )
         assert await db.count_messages("proj-1") == 1
         assert await db.count_messages("proj-999") == 0
 
@@ -421,11 +454,16 @@ class TestSearch:
         p = await db.create_project(Project(name="P", description="", idea="x"))
         t = Task(project_id=p.id, title="T", description="")
         await db.create_task(t)
-        await db.create_artifact(Artifact(
-            project_id=p.id, task_id=t.id, agent=AgentRole.CODER,
-            filename="utils.py", content="def helper(): pass",
-            artifact_type="code",
-        ))
+        await db.create_artifact(
+            Artifact(
+                project_id=p.id,
+                task_id=t.id,
+                agent=AgentRole.CODER,
+                filename="utils.py",
+                content="def helper(): pass",
+                artifact_type="code",
+            )
+        )
         results = await db.search_artifacts(p.id, "helper")
         assert len(results) == 1
         assert results[0].filename == "utils.py"
@@ -472,10 +510,16 @@ class TestDiagnostics:
         p = await db.create_project(Project(name="S", description="", idea="x"))
         t = Task(project_id=p.id, title="T", description="")
         await db.create_task(t)
-        await db.create_artifact(Artifact(
-            project_id=p.id, task_id=t.id, agent=AgentRole.CODER,
-            filename="f.py", content="x", artifact_type="code",
-        ))
+        await db.create_artifact(
+            Artifact(
+                project_id=p.id,
+                task_id=t.id,
+                agent=AgentRole.CODER,
+                filename="f.py",
+                content="x",
+                artifact_type="code",
+            )
+        )
         stats = await db.get_stats()
         assert stats["total_projects"] == 1
         assert stats["total_tasks"] == 1

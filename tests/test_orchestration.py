@@ -15,27 +15,24 @@ Covers:
 
 from __future__ import annotations
 
-import pytest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
+import pytest
+
+from src.agents.pm_agent import PMAgent
+from src.agents.research_agent import ResearchAgent
 from src.core.database import Database
 from src.core.models import (
-    AgentMessage,
     AgentRole,
-    MessagePayload,
     MessageType,
-    Priority,
     Project,
     Task,
     TaskState,
 )
 from src.orchestrator.guardrails import Guardrails
-from src.orchestrator.task_manager import TaskManager, VALID_TRANSITIONS
 from src.orchestrator.pipeline import Pipeline
-from src.agents.pm_agent import PMAgent
-from src.agents.research_agent import ResearchAgent
+from src.orchestrator.task_manager import TaskManager
 from tests.conftest import MockMessageBus, MockOllamaClient, make_message
-
 
 # ============================================================
 # Helpers
@@ -79,12 +76,17 @@ class TestTaskDependencies:
         tm = await _make_tm(db, mock_bus)
 
         t1 = await tm.create_task(
-            project_id=p.id, title="Research", description="Do research",
+            project_id=p.id,
+            title="Research",
+            description="Do research",
             assigned_to=AgentRole.RESEARCH,
         )
         t2 = await tm.create_task(
-            project_id=p.id, title="Spec", description="Write spec",
-            assigned_to=AgentRole.SPEC, depends_on=[t1.id],
+            project_id=p.id,
+            title="Spec",
+            description="Write spec",
+            assigned_to=AgentRole.SPEC,
+            depends_on=[t1.id],
         )
 
         assert t2.depends_on == [t1.id]
@@ -94,18 +96,22 @@ class TestTaskDependencies:
         assert fetched is not None
         assert fetched.depends_on == [t1.id]
 
-    async def test_assignable_tasks_no_deps(
-        self, db: Database, mock_bus: MockMessageBus
-    ) -> None:
+    async def test_assignable_tasks_no_deps(self, db: Database, mock_bus: MockMessageBus) -> None:
         """Tasks with no dependencies are always assignable."""
         p = await _make_project(db)
         tm = await _make_tm(db, mock_bus)
 
-        t1 = await tm.create_task(
-            project_id=p.id, title="A", description="", assigned_to=AgentRole.RESEARCH,
+        await tm.create_task(
+            project_id=p.id,
+            title="A",
+            description="",
+            assigned_to=AgentRole.RESEARCH,
         )
-        t2 = await tm.create_task(
-            project_id=p.id, title="B", description="", assigned_to=AgentRole.RESEARCH,
+        await tm.create_task(
+            project_id=p.id,
+            title="B",
+            description="",
+            assigned_to=AgentRole.RESEARCH,
         )
 
         assignable = await tm.get_assignable_tasks(p.id)
@@ -119,12 +125,17 @@ class TestTaskDependencies:
         tm = await _make_tm(db, mock_bus)
 
         t1 = await tm.create_task(
-            project_id=p.id, title="Research", description="",
+            project_id=p.id,
+            title="Research",
+            description="",
             assigned_to=AgentRole.RESEARCH,
         )
         t2 = await tm.create_task(
-            project_id=p.id, title="Spec", description="",
-            assigned_to=AgentRole.SPEC, depends_on=[t1.id],
+            project_id=p.id,
+            title="Spec",
+            description="",
+            assigned_to=AgentRole.SPEC,
+            depends_on=[t1.id],
         )
 
         assignable = await tm.get_assignable_tasks(p.id)
@@ -140,12 +151,17 @@ class TestTaskDependencies:
         tm = await _make_tm(db, mock_bus)
 
         t1 = await tm.create_task(
-            project_id=p.id, title="Research", description="",
+            project_id=p.id,
+            title="Research",
+            description="",
             assigned_to=AgentRole.RESEARCH,
         )
         t2 = await tm.create_task(
-            project_id=p.id, title="Spec", description="",
-            assigned_to=AgentRole.SPEC, depends_on=[t1.id],
+            project_id=p.id,
+            title="Spec",
+            description="",
+            assigned_to=AgentRole.SPEC,
+            depends_on=[t1.id],
         )
 
         # Walk t1 through its lifecycle to DONE
@@ -168,7 +184,9 @@ class TestTaskDependencies:
 
         for i in range(5):
             await tm.create_task(
-                project_id=p.id, title=f"Task {i}", description="",
+                project_id=p.id,
+                title=f"Task {i}",
+                description="",
                 assigned_to=AgentRole.RESEARCH,
             )
 
@@ -184,14 +202,14 @@ class TestTaskDependencies:
 class TestTokenBudget:
     """Tests for project token budget tracking."""
 
-    async def test_record_tokens(
-        self, db: Database, mock_bus: MockMessageBus
-    ) -> None:
+    async def test_record_tokens(self, db: Database, mock_bus: MockMessageBus) -> None:
         p = await _make_project(db)
         tm = await _make_tm(db, mock_bus, token_budget=10_000)
 
         t1 = await tm.create_task(
-            project_id=p.id, title="Task", description="",
+            project_id=p.id,
+            title="Task",
+            description="",
         )
 
         result = await tm.record_tokens(p.id, t1.id, 500)
@@ -201,22 +219,20 @@ class TestTokenBudget:
         assert usage["tokens_used"] == 500
         assert usage["remaining"] == 9_500
 
-    async def test_token_budget_exceeded(
-        self, db: Database, mock_bus: MockMessageBus
-    ) -> None:
+    async def test_token_budget_exceeded(self, db: Database, mock_bus: MockMessageBus) -> None:
         p = await _make_project(db)
         tm = await _make_tm(db, mock_bus, token_budget=1_000)
 
         t1 = await tm.create_task(
-            project_id=p.id, title="Task", description="",
+            project_id=p.id,
+            title="Task",
+            description="",
         )
 
         result = await tm.record_tokens(p.id, t1.id, 1_500)
         assert result is False
 
-    async def test_record_tokens_zero_is_noop(
-        self, db: Database, mock_bus: MockMessageBus
-    ) -> None:
+    async def test_record_tokens_zero_is_noop(self, db: Database, mock_bus: MockMessageBus) -> None:
         p = await _make_project(db)
         tm = await _make_tm(db, mock_bus, token_budget=10_000)
 
@@ -233,7 +249,9 @@ class TestTokenBudget:
         tm = await _make_tm(db, mock_bus, token_budget=100_000)
 
         t1 = await tm.create_task(
-            project_id=p.id, title="Task", description="",
+            project_id=p.id,
+            title="Task",
+            description="",
         )
         await tm.record_tokens(p.id, t1.id, 2_000)
 
@@ -269,12 +287,19 @@ class TestDeadlockDetection:
     def test_deadlock_pending_with_unmet_deps(self) -> None:
         g = Guardrails()
         t_failed = Task(
-            id="t1", project_id="p", title="A", description="",
+            id="t1",
+            project_id="p",
+            title="A",
+            description="",
             state=TaskState.FAILED,
         )
         t_blocked = Task(
-            id="t2", project_id="p", title="B", description="",
-            state=TaskState.PENDING, depends_on=["t1"],
+            id="t2",
+            project_id="p",
+            title="B",
+            description="",
+            state=TaskState.PENDING,
+            depends_on=["t1"],
         )
         assert g.detect_deadlock([t_failed, t_blocked]) is True
 
@@ -301,10 +326,20 @@ class TestDeadlockDetection:
         g = Guardrails()
         t1 = Task(id="dep", project_id="p", title="Dep", description="", state=TaskState.FAILED)
         t2 = Task(
-            id="blocked", project_id="p", title="Blocked", description="",
-            state=TaskState.PENDING, depends_on=["dep"],
+            id="blocked",
+            project_id="p",
+            title="Blocked",
+            description="",
+            state=TaskState.PENDING,
+            depends_on=["dep"],
         )
-        t3 = Task(id="also_failed", project_id="p", title="Also Failed", description="", state=TaskState.FAILED)
+        t3 = Task(
+            id="also_failed",
+            project_id="p",
+            title="Also Failed",
+            description="",
+            state=TaskState.FAILED,
+        )
         assert g.detect_deadlock([t1, t2, t3]) is True
 
 
@@ -318,17 +353,17 @@ class TestActivityTimeout:
 
     def test_recent_activity(self) -> None:
         g = Guardrails(activity_timeout=60)
-        recent = datetime.now(timezone.utc)
+        recent = datetime.now(UTC)
         assert g.check_activity_timeout(recent) is True
 
     def test_stale_activity(self) -> None:
         g = Guardrails(activity_timeout=60)
-        stale = datetime.now(timezone.utc) - timedelta(minutes=120)
+        stale = datetime.now(UTC) - timedelta(minutes=120)
         assert g.check_activity_timeout(stale) is False
 
     def test_activity_timeout_with_string_datetime(self) -> None:
         g = Guardrails(activity_timeout=60)
-        stale = (datetime.now(timezone.utc) - timedelta(minutes=120)).isoformat()
+        stale = (datetime.now(UTC) - timedelta(minutes=120)).isoformat()
         assert g.check_activity_timeout(stale) is False
 
 
@@ -340,17 +375,18 @@ class TestActivityTimeout:
 class TestEscalation:
     """Tests that guardrail failures escalate to PM."""
 
-    async def test_max_iterations_escalates(
-        self, db: Database, mock_bus: MockMessageBus
-    ) -> None:
+    async def test_max_iterations_escalates(self, db: Database, mock_bus: MockMessageBus) -> None:
         """When max iterations are reached, PM gets a STATUS_UPDATE."""
         p = await _make_project(db)
         g = Guardrails(max_iterations=2)
         tm = TaskManager(db=db, bus=mock_bus, guardrails=g)
 
         task = await tm.create_task(
-            project_id=p.id, title="Coding", description="Write code",
-            assigned_to=AgentRole.CODER, max_iterations=2,
+            project_id=p.id,
+            title="Coding",
+            description="Write code",
+            assigned_to=AgentRole.CODER,
+            max_iterations=2,
         )
 
         # Walk to REVISION twice
@@ -365,10 +401,7 @@ class TestEscalation:
         assert result.state == TaskState.FAILED
 
         # Check that an escalation message was published
-        escalation_msgs = [
-            m for m in mock_bus.published
-            if m.recipient == AgentRole.PM
-        ]
+        escalation_msgs = [m for m in mock_bus.published if m.recipient == AgentRole.PM]
         assert len(escalation_msgs) == 1
         assert "guardrail" in escalation_msgs[0].payload.content.lower()
 
@@ -434,14 +467,14 @@ class TestPauseResume:
 class TestTaskRetry:
     """Tests for manual task retry."""
 
-    async def test_retry_failed_task(
-        self, db: Database, mock_bus: MockMessageBus
-    ) -> None:
+    async def test_retry_failed_task(self, db: Database, mock_bus: MockMessageBus) -> None:
         p = await _make_project(db)
         tm = await _make_tm(db, mock_bus)
 
         task = await tm.create_task(
-            project_id=p.id, title="Coding", description="",
+            project_id=p.id,
+            title="Coding",
+            description="",
             assigned_to=AgentRole.CODER,
         )
 
@@ -460,7 +493,9 @@ class TestTaskRetry:
         tm = await _make_tm(db, mock_bus)
 
         task = await tm.create_task(
-            project_id=p.id, title="Coding", description="",
+            project_id=p.id,
+            title="Coding",
+            description="",
         )
 
         with pytest.raises(ValueError, match="Invalid transition"):
@@ -485,11 +520,15 @@ class TestPMParallelDispatch:
 
         # Create two independent tasks
         await tm.create_task(
-            project_id=p.id, title="Research A", description="Research topic A",
+            project_id=p.id,
+            title="Research A",
+            description="Research topic A",
             assigned_to=AgentRole.RESEARCH,
         )
         await tm.create_task(
-            project_id=p.id, title="Research B", description="Research topic B",
+            project_id=p.id,
+            title="Research B",
+            description="Research topic B",
             assigned_to=AgentRole.RESEARCH,
         )
 
@@ -499,10 +538,7 @@ class TestPMParallelDispatch:
         assert result.type == MessageType.TASK_ASSIGNMENT
 
         # Check that additional messages were published for parallel tasks
-        task_assignments = [
-            m for m in mock_bus.published
-            if m.type == MessageType.TASK_ASSIGNMENT
-        ]
+        task_assignments = [m for m in mock_bus.published if m.type == MessageType.TASK_ASSIGNMENT]
         # We expect 1 published (the second task), the first is returned
         assert len(task_assignments) >= 1
 
@@ -515,22 +551,24 @@ class TestPMParallelDispatch:
         pm = PMAgent(bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm)
 
         t1 = await tm.create_task(
-            project_id=p.id, title="Research", description="Research topic",
+            project_id=p.id,
+            title="Research",
+            description="Research topic",
             assigned_to=AgentRole.RESEARCH,
         )
         await tm.create_task(
-            project_id=p.id, title="Spec", description="Write spec",
-            assigned_to=AgentRole.SPEC, depends_on=[t1.id],
+            project_id=p.id,
+            title="Spec",
+            description="Write spec",
+            assigned_to=AgentRole.SPEC,
+            depends_on=[t1.id],
         )
 
         result = await pm._assign_next_task(p.id)
         assert result is not None
 
         # Only one task should be dispatched (the independent one)
-        all_assignments = [
-            m for m in mock_bus.published
-            if m.type == MessageType.TASK_ASSIGNMENT
-        ]
+        all_assignments = [m for m in mock_bus.published if m.type == MessageType.TASK_ASSIGNMENT]
         # Plus the returned result — total should be 1 independent task
         assert len(all_assignments) == 0  # Only the returned message, nothing extra published
 
@@ -623,7 +661,9 @@ class TestPipelineHealthCheck:
         tm = TaskManager(db=db, bus=mock_bus)
 
         task = await tm.create_task(
-            project_id=p.id, title="Stuck", description="",
+            project_id=p.id,
+            title="Stuck",
+            description="",
             assigned_to=AgentRole.CODER,
         )
         # Set to FAILED directly
@@ -634,8 +674,7 @@ class TestPipelineHealthCheck:
         await pipeline._check_health()
 
         deadlock_events = [
-            (et, data) for et, data in mock_bus.ui_events
-            if et == "project_deadlock"
+            (et, data) for et, data in mock_bus.ui_events if et == "project_deadlock"
         ]
         assert len(deadlock_events) == 1
 
@@ -671,7 +710,9 @@ class TestDatabaseV3:
     async def test_depends_on_round_trip(self, db: Database) -> None:
         p = await _make_project(db)
         task = Task(
-            project_id=p.id, title="T", description="",
+            project_id=p.id,
+            title="T",
+            description="",
             depends_on=["dep-1", "dep-2"],
         )
         await db.create_task(task)
@@ -683,7 +724,9 @@ class TestDatabaseV3:
     async def test_tokens_used_round_trip(self, db: Database) -> None:
         p = await _make_project(db)
         task = Task(
-            project_id=p.id, title="T", description="",
+            project_id=p.id,
+            title="T",
+            description="",
             tokens_used=42,
         )
         await db.create_task(task)

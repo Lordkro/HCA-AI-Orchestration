@@ -41,7 +41,7 @@ def setup_logging(
 
         file_handler = RotatingFileHandler(
             str(log_path),
-            maxBytes=10 * 1024 * 1024,   # 10 MB
+            maxBytes=10 * 1024 * 1024,  # 10 MB
             backupCount=5,
             encoding="utf-8",
         )

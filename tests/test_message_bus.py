@@ -13,18 +13,14 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
-from src.core.message_bus import BusStats, CONSUMER_GROUP, AGENT_STREAM
+from src.core.message_bus import AGENT_STREAM, CONSUMER_GROUP, BusStats, MessageBus
 from src.core.models import (
     AgentMessage,
     AgentRole,
-    MessagePayload,
     MessageType,
     Priority,
 )
 from tests.conftest import MockMessageBus, make_message
-
 
 # ============================================================
 # Message Serialization Round-Trip
@@ -105,6 +101,18 @@ class TestBusConfig:
     def test_stream_name_for_agent(self) -> None:
         expected = AGENT_STREAM.format(agent="pm")
         assert expected == "hca:agents:pm"
+
+    def test_broadcast_targets_all_agent_inboxes(self) -> None:
+        msg = make_message(recipient="*")
+        streams = MessageBus._target_streams(msg)
+
+        assert set(streams) == {
+            "hca:agents:pm",
+            "hca:agents:research",
+            "hca:agents:spec",
+            "hca:agents:coder",
+            "hca:agents:critic",
+        }
 
 
 # ============================================================

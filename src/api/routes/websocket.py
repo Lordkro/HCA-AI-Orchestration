@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -98,4 +99,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 await pubsub.unsubscribe("hca:notifications")
                 await pubsub.aclose()
             except Exception:
-                pass
+                logging.getLogger(__name__).debug(
+                    "Failed to close websocket pubsub cleanly",
+                    exc_info=True,
+                )

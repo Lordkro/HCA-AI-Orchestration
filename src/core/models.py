@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
-
 
 # ============================================================
 # Enums
 # ============================================================
 
 
-class TaskState(str, Enum):
+class TaskState(StrEnum):
     """Lifecycle states for a task."""
+
     PENDING = "pending"
     ASSIGNED = "assigned"
     IN_PROGRESS = "in_progress"
@@ -26,8 +26,9 @@ class TaskState(str, Enum):
     FAILED = "failed"
 
 
-class MessageType(str, Enum):
+class MessageType(StrEnum):
     """Types of inter-agent messages."""
+
     TASK_ASSIGNMENT = "task_assignment"
     DELIVERABLE = "deliverable"
     FEEDBACK = "feedback"
@@ -37,16 +38,18 @@ class MessageType(str, Enum):
     SYSTEM = "system"
 
 
-class Priority(str, Enum):
+class Priority(StrEnum):
     """Message / task priority levels."""
+
     LOW = "low"
     NORMAL = "normal"
     HIGH = "high"
     CRITICAL = "critical"
 
 
-class AgentRole(str, Enum):
+class AgentRole(StrEnum):
     """Roles of the agents in the system."""
+
     PM = "pm"
     RESEARCH = "research"
     SPEC = "spec"
@@ -56,8 +59,9 @@ class AgentRole(str, Enum):
     USER = "user"
 
 
-class AgentStatus(str, Enum):
+class AgentStatus(StrEnum):
     """Operational status of an agent."""
+
     IDLE = "idle"
     THINKING = "thinking"
     WORKING = "working"
@@ -72,7 +76,7 @@ class AgentStatus(str, Enum):
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _new_id() -> str:
@@ -81,6 +85,7 @@ def _new_id() -> str:
 
 class MessagePayload(BaseModel):
     """The content portion of an agent message."""
+
     content: str
     artifacts: list[str] = Field(default_factory=list)
     metadata: dict[str, str] = Field(default_factory=dict)
@@ -88,6 +93,7 @@ class MessagePayload(BaseModel):
 
 class AgentMessage(BaseModel):
     """A message passed between agents via the message bus."""
+
     id: str = Field(default_factory=_new_id)
     timestamp: datetime = Field(default_factory=_utc_now)
     sender: AgentRole
@@ -101,6 +107,7 @@ class AgentMessage(BaseModel):
 
 class Project(BaseModel):
     """A project being built by the agent team."""
+
     id: str = Field(default_factory=_new_id)
     name: str
     description: str
@@ -113,6 +120,7 @@ class Project(BaseModel):
 
 class Task(BaseModel):
     """A unit of work within a project."""
+
     id: str = Field(default_factory=_new_id)
     project_id: str
     title: str
@@ -133,6 +141,7 @@ class Task(BaseModel):
 
 class Artifact(BaseModel):
     """A file or document produced by an agent."""
+
     id: str = Field(default_factory=_new_id)
     project_id: str
     task_id: str
@@ -146,6 +155,7 @@ class Artifact(BaseModel):
 
 class ConversationEntry(BaseModel):
     """A single turn in an agent's conversation history."""
+
     role: str  # "system", "user", "assistant"
     content: str
     timestamp: datetime = Field(default_factory=_utc_now)

@@ -17,10 +17,11 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+
+# Avoid circular import — TaskManager is optional and injected at runtime.
+from typing import TYPE_CHECKING, Any
 
 import structlog
-
 from src.core.config import settings
 from src.core.database import Database
 from src.core.message_bus import MessageBus
@@ -35,9 +36,6 @@ from src.core.models import (
     TaskState,
 )
 from src.core.ollama_client import OllamaClient
-
-# Avoid circular import — TaskManager is optional and injected at runtime.
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.orchestrator.task_manager import TaskManager
@@ -76,9 +74,7 @@ class AgentStats:
             "llm_errors": self.llm_errors,
             "total_think_seconds": round(self.total_think_seconds, 2),
             "avg_think_seconds": (
-                round(self.total_think_seconds / self.llm_calls, 2)
-                if self.llm_calls
-                else 0
+                round(self.total_think_seconds / self.llm_calls, 2) if self.llm_calls else 0
             ),
             "projects_touched": len(self.projects_touched),
             "uptime_seconds": round(uptime, 1),
@@ -161,9 +157,7 @@ class BaseAgent(ABC):
             self._system_prompt = prompt_file.read_text(encoding="utf-8").strip()
             logger.info("prompt_loaded", agent=self.role.value, file=str(prompt_file))
         else:
-            self._system_prompt = (
-                f"You are the {self.role.value} agent in an AI development team."
-            )
+            self._system_prompt = f"You are the {self.role.value} agent in an AI development team."
             logger.warning("prompt_default", agent=self.role.value)
 
     def reload_prompt(self) -> None:
@@ -205,9 +199,7 @@ class BaseAgent(ABC):
                         await self._handle_message_reliable(stream_name, entry_id, msg)
 
                 # 2. Consume new messages
-                results = await self.bus.consume(
-                    self.role, last_id=">", block_ms=2000
-                )
+                results = await self.bus.consume(self.role, last_id=">", block_ms=2000)
                 if not results:
                     # No messages, pause briefly to avoid tight loop
                     await asyncio.sleep(0.5)
@@ -245,9 +237,7 @@ class BaseAgent(ABC):
     # Heartbeat
     # --------------------------------------------------------
 
-    async def _emit_heartbeat(
-        self, *, force: bool = False, stopping: bool = False
-    ) -> None:
+    async def _emit_heartbeat(self, *, force: bool = False, stopping: bool = False) -> None:
         """Publish a heartbeat event so the dashboard can show agent status."""
         now = time.monotonic()
         if not force and (now - self._last_heartbeat) < self.HEARTBEAT_INTERVAL:
@@ -297,11 +287,15 @@ class BaseAgent(ABC):
 
         # All retries exhausted — dead-letter
         self.stats.messages_dead_lettered += 1
+        reason = (
+            f"Agent {self.role.value} failed after "
+            f"{1 + self.MAX_PROCESSING_RETRIES} attempts: {last_error}"
+        )
         await self.bus.move_to_dead_letter(
             stream_name,
             entry_id,
             message,
-            reason=f"Agent {self.role.value} failed after {1 + self.MAX_PROCESSING_RETRIES} attempts: {last_error}",
+            reason=reason,
         )
 
     def _set_activity(self, activity: str) -> None:
@@ -380,9 +374,7 @@ class BaseAgent(ABC):
             self._project_histories[project_id] = []
         return self._project_histories[project_id]
 
-    def _append_history(
-        self, project_id: str, role: str, content: str
-    ) -> None:
+    def _append_history(self, project_id: str, role: str, content: str) -> None:
         """Append a turn to a project's history, auto-pruning old turns."""
         history = self._get_history(project_id)
         history.append(ConversationEntry(role=role, content=content))
@@ -392,7 +384,7 @@ class BaseAgent(ABC):
             keep_early = 2  # Preserve earliest context (e.g., initial plan)
             overflow = len(history) - self.MAX_HISTORY_PER_PROJECT
             # Delete from just after the early turns
-            del history[keep_early:keep_early + overflow]
+            del history[keep_early : keep_early + overflow]
 
     def clear_history(self, project_id: str | None = None) -> None:
         """Clear conversation history for one project or all projects."""
@@ -435,9 +427,7 @@ class BaseAgent(ABC):
         self._set_activity(f"Waiting for LLM response ({self._model})")
 
         # Build messages list
-        messages: list[dict[str, str]] = [
-            {"role": "system", "content": self._system_prompt}
-        ]
+        messages: list[dict[str, str]] = [{"role": "system", "content": self._system_prompt}]
 
         # Per-project history (OllamaClient auto-trims if too long)
         for entry in self._get_history(pid):
@@ -471,13 +461,20 @@ class BaseAgent(ABC):
         # Track token usage at the project level (via TaskManager)
         if self.task_manager and project_id:
             from src.core.ollama_client import estimate_tokens
+
             prompt_tokens = sum(estimate_tokens(m["content"]) for m in messages)
             response_tokens = estimate_tokens(response)
             total_tokens = prompt_tokens + response_tokens
             try:
                 await self.task_manager.record_tokens(project_id, task_id, total_tokens)
-            except Exception:
-                pass  # Don't let token tracking break agent flow
+            except Exception as exc:
+                logger.warning(
+                    "token_tracking_failed",
+                    agent=self.role.value,
+                    project_id=project_id,
+                    task_id=task_id,
+                    error=str(exc),
+                )
 
         self.status = AgentStatus.IDLE
         return response
@@ -486,9 +483,7 @@ class BaseAgent(ABC):
     # Message Sending Helpers
     # --------------------------------------------------------
 
-    async def _transition_task(
-        self, task_id: str, new_state: TaskState
-    ) -> bool:
+    async def _transition_task(self, task_id: str, new_state: TaskState) -> bool:
         """Attempt a task state transition via the TaskManager.
 
         Returns True on success, False if no TaskManager is set or the
@@ -580,8 +575,6 @@ class BaseAgent(ABC):
             "current_activity": self._current_activity,
             "activity_duration_seconds": round(activity_duration, 1),
             "active_projects": list(self._project_histories.keys()),
-            "history_sizes": {
-                pid: len(h) for pid, h in self._project_histories.items()
-            },
+            "history_sizes": {pid: len(h) for pid, h in self._project_histories.items()},
             "stats": self.stats.snapshot(),
         }

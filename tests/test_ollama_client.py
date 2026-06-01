@@ -6,8 +6,6 @@ and client initialization — all without a real Ollama server.
 
 from __future__ import annotations
 
-import pytest
-
 from src.core.ollama_client import (
     ClientStats,
     GenerationStats,
@@ -15,7 +13,6 @@ from src.core.ollama_client import (
     estimate_messages_tokens,
     estimate_tokens,
 )
-
 
 # ============================================================
 # Token Estimation

@@ -11,11 +11,10 @@ Provides configurable limits to prevent:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Sequence
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 
 import structlog
-
 from src.core.config import settings
 from src.core.models import Task, TaskState
 
@@ -25,13 +24,15 @@ logger = structlog.get_logger()
 _TERMINAL_STATES = frozenset({TaskState.DONE, TaskState.FAILED})
 
 # Active (non-terminal) states — tasks we should watch for stuck-ness.
-_ACTIVE_STATES = frozenset({
-    TaskState.PENDING,
-    TaskState.ASSIGNED,
-    TaskState.IN_PROGRESS,
-    TaskState.REVIEW,
-    TaskState.REVISION,
-})
+_ACTIVE_STATES = frozenset(
+    {
+        TaskState.PENDING,
+        TaskState.ASSIGNED,
+        TaskState.IN_PROGRESS,
+        TaskState.REVIEW,
+        TaskState.REVISION,
+    }
+)
 
 
 class Guardrails:
@@ -102,7 +103,7 @@ class Guardrails:
         if task.state in _TERMINAL_STATES:
             return True  # Terminal states never time out
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         updated = task.updated_at
         if isinstance(updated, str):
             updated = datetime.fromisoformat(updated)
@@ -147,7 +148,7 @@ class Guardrails:
         if isinstance(last_activity, str):
             last_activity = datetime.fromisoformat(last_activity)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         deadline = last_activity + timedelta(minutes=self.activity_timeout_minutes)
         if now > deadline:
             logger.warning(

@@ -12,7 +12,6 @@ from __future__ import annotations
 import re
 
 import structlog
-
 from src.agents.base_agent import BaseAgent
 from src.core.database import Database
 from src.core.message_bus import MessageBus
@@ -20,7 +19,6 @@ from src.core.models import (
     AgentMessage,
     AgentRole,
     MessageType,
-    Priority,
     Task,
     TaskState,
 )
@@ -47,7 +45,9 @@ class PMAgent(BaseAgent):
         db: Database,
         task_manager: object | None = None,
     ) -> None:
-        super().__init__(role=AgentRole.PM, bus=bus, ollama=ollama, db=db, task_manager=task_manager)
+        super().__init__(
+            role=AgentRole.PM, bus=bus, ollama=ollama, db=db, task_manager=task_manager
+        )
 
     async def process_message(self, message: AgentMessage) -> AgentMessage | None:
         """Handle incoming messages based on type."""
@@ -189,25 +189,15 @@ Think step by step about what needs to be built and in what order."""
     # ------------------------------------------------------------------
 
     # Regex for the structured TASK: blocks from the LLM
-    _TASK_HEADER_RE = re.compile(
-        r"^TASK:\s*(.+)$", re.IGNORECASE | re.MULTILINE
-    )
+    _TASK_HEADER_RE = re.compile(r"^TASK:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
     _AGENT_RE = re.compile(r"^AGENT:\s*(\w+)", re.IGNORECASE | re.MULTILINE)
-    _PRIORITY_RE = re.compile(
-        r"^PRIORITY:\s*(\w+)", re.IGNORECASE | re.MULTILINE
-    )
-    _DEPENDS_ON_RE = re.compile(
-        r"^DEPENDS_ON:\s*(.+)$", re.IGNORECASE | re.MULTILINE
-    )
-    _DESCRIPTION_RE = re.compile(
-        r"^DESCRIPTION:\s*(.*)", re.IGNORECASE | re.MULTILINE | re.DOTALL
-    )
+    _PRIORITY_RE = re.compile(r"^PRIORITY:\s*(\w+)", re.IGNORECASE | re.MULTILINE)
+    _DEPENDS_ON_RE = re.compile(r"^DEPENDS_ON:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+    _DESCRIPTION_RE = re.compile(r"^DESCRIPTION:\s*(.*)", re.IGNORECASE | re.MULTILINE | re.DOTALL)
 
     _VALID_AGENTS = {"research", "spec", "coder"}
 
-    def _parse_tasks(
-        self, response: str, project_id: str
-    ) -> list[dict[str, str | list[str]]]:
+    def _parse_tasks(self, response: str, project_id: str) -> list[dict[str, str | list[str]]]:
         """Parse the LLM's structured output into task dicts.
 
         Returns a list of ``{"title", "agent", "priority", "description",
@@ -232,11 +222,7 @@ Think step by step about what needs to be built and in what order."""
                 continue
 
             priority_m = self._PRIORITY_RE.search(part)
-            priority = (
-                priority_m.group(1).strip().lower()
-                if priority_m
-                else "normal"
-            )
+            priority = priority_m.group(1).strip().lower() if priority_m else "normal"
             if priority not in {"low", "normal", "high", "critical"}:
                 priority = "normal"
 
@@ -246,22 +232,22 @@ Think step by step about what needs to be built and in what order."""
             if depends_on_m:
                 raw = depends_on_m.group(1).strip()
                 if raw.lower() != "none":
-                    depends_on_titles = [
-                        t.strip() for t in raw.split(",") if t.strip()
-                    ]
+                    depends_on_titles = [t.strip() for t in raw.split(",") if t.strip()]
 
             # Everything after DESCRIPTION: (up to the next TASK: which
             # we already split on)
             desc_m = self._DESCRIPTION_RE.search(part)
             description = desc_m.group(1).strip() if desc_m else title_m.group(1).strip()
 
-            tasks.append({
-                "title": title_m.group(1).strip(),
-                "agent": agent,
-                "priority": priority,
-                "description": description,
-                "depends_on_titles": depends_on_titles,
-            })
+            tasks.append(
+                {
+                    "title": title_m.group(1).strip(),
+                    "agent": agent,
+                    "priority": priority,
+                    "description": description,
+                    "depends_on_titles": depends_on_titles,
+                }
+            )
 
         logger.info(
             "pm_tasks_parsed",
@@ -406,9 +392,7 @@ Please provide a clear, decisive answer to help them proceed."""
     # Task Assignment
     # ------------------------------------------------------------------
 
-    async def _assign_next_task(
-        self, project_id: str
-    ) -> AgentMessage | None:
+    async def _assign_next_task(self, project_id: str) -> AgentMessage | None:
         """Find assignable tasks and dispatch them.
 
         Uses dependency-aware ordering via ``TaskManager.get_assignable_tasks``.

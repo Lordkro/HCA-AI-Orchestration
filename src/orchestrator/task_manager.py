@@ -12,10 +12,9 @@ Phase 3 additions:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import structlog
-
 from src.core.database import Database
 from src.core.message_bus import MessageBus
 from src.core.models import (
@@ -118,7 +117,7 @@ class TaskManager:
 
         old_state = task.state
         task.state = new_state
-        task.updated_at = datetime.now(timezone.utc)
+        task.updated_at = datetime.now(UTC)
 
         # Handle iteration counting for revision cycles
         if new_state == TaskState.REVISION:
@@ -145,13 +144,16 @@ class TaskManager:
         )
 
         # Publish state change event for UI
-        await self.bus.publish_ui_event("task_state_changed", {
-            "task_id": task.id,
-            "project_id": task.project_id,
-            "old_state": old_state.value,
-            "new_state": task.state.value,
-            "iteration": task.iteration,
-        })
+        await self.bus.publish_ui_event(
+            "task_state_changed",
+            {
+                "task_id": task.id,
+                "project_id": task.project_id,
+                "old_state": old_state.value,
+                "new_state": task.state.value,
+                "iteration": task.iteration,
+            },
+        )
 
         return task
 
@@ -175,6 +177,7 @@ class TaskManager:
             List of PENDING tasks that can be assigned right now.
         """
         from src.core.config import settings as _settings
+
         cap = limit if limit is not None else _settings.max_parallel_tasks
 
         pending = await self.db.list_tasks(project_id, state=TaskState.PENDING)
@@ -200,9 +203,7 @@ class TaskManager:
     # Token Budget
     # ------------------------------------------------------------------
 
-    async def record_tokens(
-        self, project_id: str, task_id: str, tokens: int
-    ) -> bool:
+    async def record_tokens(self, project_id: str, task_id: str, tokens: int) -> bool:
         """Record tokens consumed by an LLM call.
 
         Updates both the task-level and project-level counters.
@@ -237,9 +238,7 @@ class TaskManager:
             "tokens_used": project_tokens,
             "budget": self.guardrails.project_token_budget,
             "remaining": max(0, self.guardrails.project_token_budget - project_tokens),
-            "pct_used": round(
-                project_tokens / self.guardrails.project_token_budget * 100, 1
-            )
+            "pct_used": round(project_tokens / self.guardrails.project_token_budget * 100, 1)
             if self.guardrails.project_token_budget > 0
             else 0,
         }

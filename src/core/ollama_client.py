@@ -14,10 +14,11 @@ import asyncio
 import json
 import re
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import AsyncIterator
 
 import httpx
+
 import structlog
 
 logger = structlog.get_logger()
@@ -56,6 +57,7 @@ def estimate_messages_tokens(messages: list[dict[str, str]]) -> int:
 @dataclass
 class GenerationStats:
     """Statistics from a single LLM generation call."""
+
     model: str
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -67,6 +69,7 @@ class GenerationStats:
 @dataclass
 class ClientStats:
     """Cumulative statistics for the Ollama client."""
+
     total_requests: int = 0
     total_failures: int = 0
     total_retries: int = 0
@@ -157,16 +160,13 @@ class OllamaClient:
 
         for attempt in range(self.max_retries + 1):
             try:
-                response = await self._client.request(
-                    method, path, json=json_data
-                )
+                response = await self._client.request(method, path, json=json_data)
 
                 # Check for model not found errors
                 if response.status_code == 404:
                     model = (json_data or {}).get("model", "unknown")
                     raise OllamaModelError(
-                        f"Model '{model}' not found. Pull it first with: "
-                        f"ollama pull {model}"
+                        f"Model '{model}' not found. Pull it first with: ollama pull {model}"
                     )
 
                 response.raise_for_status()
@@ -194,7 +194,7 @@ class OllamaClient:
 
             # Exponential backoff
             if attempt < self.max_retries:
-                delay = self.retry_base_delay * (2 ** attempt)
+                delay = self.retry_base_delay * (2**attempt)
                 self.stats.total_retries += 1
                 logger.warning(
                     "ollama_retry",
@@ -329,8 +329,7 @@ class OllamaClient:
                     if response.status_code == 404:
                         model = payload.get("model", "unknown")
                         raise OllamaModelError(
-                            f"Model '{model}' not found. Pull it first with: "
-                            f"ollama pull {model}"
+                            f"Model '{model}' not found. Pull it first with: ollama pull {model}"
                         )
                     response.raise_for_status()
                     async for line in response.aiter_lines():
@@ -375,7 +374,7 @@ class OllamaClient:
                 last_error = OllamaError(f"HTTP error: {e}")
 
             if attempt < self.max_retries:
-                delay = self.retry_base_delay * (2 ** attempt)
+                delay = self.retry_base_delay * (2**attempt)
                 self.stats.total_retries += 1
                 logger.warning(
                     "ollama_stream_retry",
@@ -634,7 +633,7 @@ class OllamaClient:
             except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
                 last_error = e
                 if attempt < self.max_retries:
-                    delay = self.retry_base_delay * (2 ** attempt)
+                    delay = self.retry_base_delay * (2**attempt)
                     self.stats.total_retries += 1
                     logger.warning(
                         "ollama_stream_retry",
@@ -735,7 +734,9 @@ class OllamaClient:
             "total_duration_seconds": round(self.stats.total_duration_seconds, 2),
             "avg_tokens_per_second": round(
                 self.stats.total_tokens_used / self.stats.total_duration_seconds, 1
-            ) if self.stats.total_duration_seconds > 0 else 0,
+            )
+            if self.stats.total_duration_seconds > 0
+            else 0,
             "requests_by_model": self.stats.requests_by_model,
         }
 

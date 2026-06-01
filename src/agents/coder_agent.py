@@ -6,7 +6,6 @@ import re
 from pathlib import Path
 
 import structlog
-
 from src.agents.base_agent import BaseAgent
 from src.core.config import settings
 from src.core.database import Database
@@ -45,7 +44,9 @@ class CoderAgent(BaseAgent):
         db: Database,
         task_manager: object | None = None,
     ) -> None:
-        super().__init__(role=AgentRole.CODER, bus=bus, ollama=ollama, db=db, task_manager=task_manager)
+        super().__init__(
+            role=AgentRole.CODER, bus=bus, ollama=ollama, db=db, task_manager=task_manager
+        )
 
     async def process_message(self, message: AgentMessage) -> AgentMessage | None:
         """Handle incoming messages."""
@@ -99,7 +100,9 @@ Create ALL necessary files for a working implementation. Include:
 - Requirements/dependency files (if needed)
 - README or usage notes"""
 
-        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.4)
+        response = await self.think(
+            prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.4
+        )
 
         # Parse and save artifacts
         artifacts = self._parse_file_outputs(response, message.project_id, message.task_id)
@@ -137,7 +140,9 @@ Address ALL issues mentioned in the feedback. Output the complete corrected file
 
 Only output files that have changed."""
 
-        response = await self.think(prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.3)
+        response = await self.think(
+            prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.3
+        )
 
         artifacts = self._parse_file_outputs(response, message.project_id, message.task_id)
         for artifact in artifacts:
@@ -184,13 +189,9 @@ Provide a clear answer with code examples if needed."""
         r"^={2,}\s*FILE:\s*(.+?)\s*={2,}\s*$",
         re.IGNORECASE,
     )
-    _FALLBACK_MARKER_RE = re.compile(
-        r"^(?:\*\*|`)([a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+)(?:\*\*|`)\s*$"
-    )
+    _FALLBACK_MARKER_RE = re.compile(r"^(?:\*\*|`)([a-zA-Z0-9_./-]+\.[a-zA-Z0-9]+)(?:\*\*|`)\s*$")
 
-    def _parse_file_outputs(
-        self, response: str, project_id: str, task_id: str
-    ) -> list[Artifact]:
+    def _parse_file_outputs(self, response: str, project_id: str, task_id: str) -> list[Artifact]:
         """Parse the LLM response to extract file artifacts.
 
         Supports the canonical ``=== FILE: path ===`` format and falls

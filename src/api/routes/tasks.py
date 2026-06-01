@@ -13,7 +13,15 @@ router = APIRouter()
 async def list_tasks(project_id: str, request: Request, state: str | None = None) -> list[dict]:
     """List all tasks for a project, optionally filtered by state."""
     db = request.app.state.db
-    task_state = TaskState(state) if state else None
+    try:
+        task_state = TaskState(state) if state else None
+    except ValueError as exc:
+        valid_states = ", ".join(s.value for s in TaskState)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid task state '{state}'. Valid states: {valid_states}",
+        ) from exc
+
     tasks = await db.list_tasks(project_id, task_state)
     return [t.model_dump(mode="json") for t in tasks]
 

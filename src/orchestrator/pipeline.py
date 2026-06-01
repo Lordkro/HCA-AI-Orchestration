@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 
 import structlog
-
 from src.core.message_bus import MessageBus
 from src.core.models import TaskState
 from src.orchestrator.guardrails import Guardrails
@@ -156,11 +155,11 @@ class Pipeline:
                 # 3. Activity timeout — find the most-recent update across
                 #    all non-terminal tasks.
                 active_tasks = [
-                    t for t in all_tasks
-                    if t.state not in (TaskState.DONE, TaskState.FAILED)
+                    t for t in all_tasks if t.state not in (TaskState.DONE, TaskState.FAILED)
                 ]
                 if active_tasks:
                     from datetime import datetime
+
                     def _updated(t: object) -> datetime:
                         u = t.updated_at  # type: ignore[attr-defined]
                         if isinstance(u, str):
