@@ -15,12 +15,14 @@ from hca.core.message_bus import MessageBus
 from hca.core.models import TaskState
 from hca.orchestrator.guardrails import Guardrails
 from hca.orchestrator.task_manager import TaskManager
+from hca.orchestrator.workspace_manager import WorkspaceManager
 
 logger = structlog.get_logger()
 
 # How often to run maintenance tasks (seconds)
 HEALTH_CHECK_INTERVAL = 30
 STREAM_TRIM_INTERVAL = 300  # 5 minutes
+WORKSPACE_CLEANUP_INTERVAL = 3600  # 1 hour
 
 
 class Pipeline:
@@ -61,6 +63,10 @@ class Pipeline:
                 # Stream maintenance less frequently
                 if self._tick_count % (STREAM_TRIM_INTERVAL // HEALTH_CHECK_INTERVAL) == 0:
                     await self.bus.trim_streams()
+
+                # Workspace cleanup even less frequently
+                if self._tick_count % (WORKSPACE_CLEANUP_INTERVAL // HEALTH_CHECK_INTERVAL) == 0:
+                    await WorkspaceManager.cleanup_old_workspaces()
 
                 await asyncio.sleep(HEALTH_CHECK_INTERVAL)
             except asyncio.CancelledError:

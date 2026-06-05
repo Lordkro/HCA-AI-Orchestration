@@ -177,7 +177,7 @@ class TestProjectMemory:
         await agent.think("A", project_id="proj-a")
         await agent.think("B", project_id="proj-b")
 
-        agent.clear_history("proj-a")
+        await agent.clear_history("proj-a")
         assert "proj-a" not in agent._project_histories
         assert "proj-b" in agent._project_histories
 
@@ -186,7 +186,7 @@ class TestProjectMemory:
         await agent.think("A", project_id="proj-a")
         await agent.think("B", project_id="proj-b")
 
-        agent.clear_history()
+        await agent.clear_history()
         assert len(agent._project_histories) == 0
 
     async def test_think_without_project_id_uses_global(self, db, mock_bus, mock_ollama) -> None:

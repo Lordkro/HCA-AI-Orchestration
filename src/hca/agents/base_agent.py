@@ -134,6 +134,7 @@ class BaseAgent(ABC):
 
         # Per-project conversation histories
         self._project_histories: dict[str, list[ConversationEntry]] = {}
+        self._history_lock = asyncio.Lock()
 
         self._system_prompt: str = ""
         self._model: str = settings.get_agent_model(role.value)
@@ -353,7 +354,8 @@ class BaseAgent(ABC):
             raise  # Let _handle_message_reliable decide retry/dead-letter
         finally:
             self._processing = False
-            self.status = AgentStatus.IDLE
+            if self.status is not AgentStatus.ERROR:
+                self.status = AgentStatus.IDLE
             self._clear_activity()
 
     @abstractmethod
@@ -374,24 +376,28 @@ class BaseAgent(ABC):
             self._project_histories[project_id] = []
         return self._project_histories[project_id]
 
-    def _append_history(self, project_id: str, role: str, content: str) -> None:
+    async def _append_history(self, project_id: str, role: str, content: str) -> None:
         """Append a turn to a project's history, auto-pruning old turns."""
-        history = self._get_history(project_id)
-        history.append(ConversationEntry(role=role, content=content))
+        async with self._history_lock:
+            history = self._project_histories.get(project_id)
+            if history is None:
+                history = []
+                self._project_histories[project_id] = history
+            history.append(ConversationEntry(role=role, content=content))
 
-        # Auto-prune: keep first 2 turns (early context) + most recent turns
-        if len(history) > self.MAX_HISTORY_PER_PROJECT:
-            keep_early = 2  # Preserve earliest context (e.g., initial plan)
-            overflow = len(history) - self.MAX_HISTORY_PER_PROJECT
-            # Delete from just after the early turns
-            del history[keep_early : keep_early + overflow]
+            # Auto-prune: keep first 2 turns (early context) + most recent turns
+            if len(history) > self.MAX_HISTORY_PER_PROJECT:
+                keep_early = 2
+                overflow = len(history) - self.MAX_HISTORY_PER_PROJECT
+                del history[keep_early : keep_early + overflow]
 
-    def clear_history(self, project_id: str | None = None) -> None:
+    async def clear_history(self, project_id: str | None = None) -> None:
         """Clear conversation history for one project or all projects."""
-        if project_id:
-            self._project_histories.pop(project_id, None)
-        else:
-            self._project_histories.clear()
+        async with self._history_lock:
+            if project_id:
+                self._project_histories.pop(project_id, None)
+            else:
+                self._project_histories.clear()
 
     # --------------------------------------------------------
     # LLM Interaction
@@ -437,26 +443,35 @@ class BaseAgent(ABC):
 
         t0 = time.monotonic()
         try:
-            response = await self.ollama.chat(
-                messages,
-                model=self._model,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                auto_trim=True,
+            response = await asyncio.wait_for(
+                self.ollama.chat(
+                    messages,
+                    model=self._model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    auto_trim=True,
+                ),
+                timeout=300,
             )
+        except TimeoutError:
+            self.stats.llm_errors += 1
+            logger.error("agent_think_timeout", agent=self.role.value, timeout=300)
+            self.status = AgentStatus.ERROR
+            raise
         except Exception as e:
             self.stats.llm_errors += 1
             logger.error("agent_think_error", agent=self.role.value, error=str(e))
             self.status = AgentStatus.ERROR
             raise
 
+        self.status = AgentStatus.IDLE
         elapsed = time.monotonic() - t0
         self.stats.llm_calls += 1
         self.stats.total_think_seconds += elapsed
 
         # Record in per-project history
-        self._append_history(pid, "user", prompt)
-        self._append_history(pid, "assistant", response)
+        await self._append_history(pid, "user", prompt)
+        await self._append_history(pid, "assistant", response)
 
         # Track token usage at the project level (via TaskManager)
         if self.task_manager and project_id:
@@ -476,8 +491,80 @@ class BaseAgent(ABC):
                     error=str(exc),
                 )
 
-        self.status = AgentStatus.IDLE
         return response
+
+    async def think_with_tools(
+        self,
+        prompt: str,
+        tools: list[dict],
+        *,
+        project_id: str = "",
+        task_id: str = "",
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> tuple[str, list[dict]]:
+        """Send a prompt with tool definitions to the LLM."""
+        pid = project_id or "_global"
+        self.status = AgentStatus.WORKING
+        self._set_activity(f"Waiting for LLM response ({self._model})")
+
+        messages: list[dict[str, str]] = [{"role": "system", "content": self._system_prompt}]
+
+        for entry in self._get_history(pid):
+            messages.append({"role": entry.role, "content": entry.content})
+
+        messages.append({"role": "user", "content": prompt})
+
+        t0 = time.monotonic()
+        try:
+            text_response, tool_calls = await asyncio.wait_for(
+                self.ollama.chat_with_tools(
+                    messages,
+                    tools,
+                    model=self._model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    auto_trim=True,
+                ),
+                timeout=300,
+            )
+        except TimeoutError:
+            self.stats.llm_errors += 1
+            logger.error("agent_think_timeout", agent=self.role.value, timeout=300)
+            self.status = AgentStatus.ERROR
+            raise
+        except Exception as e:
+            self.stats.llm_errors += 1
+            logger.error("agent_think_error", agent=self.role.value, error=str(e))
+            self.status = AgentStatus.ERROR
+            raise
+
+        elapsed = time.monotonic() - t0
+        self.stats.llm_calls += 1
+        self.stats.total_think_seconds += elapsed
+
+        await self._append_history(pid, "user", prompt)
+        if text_response:
+            await self._append_history(pid, "assistant", text_response)
+
+        if self.task_manager and project_id:
+            from hca.core.ollama_client import estimate_tokens
+
+            prompt_tokens = sum(estimate_tokens(m["content"]) for m in messages)
+            response_tokens = estimate_tokens(text_response) if text_response else 0
+            total_tokens = prompt_tokens + response_tokens
+            try:
+                await self.task_manager.record_tokens(project_id, task_id, total_tokens)
+            except Exception as exc:
+                logger.warning(
+                    "token_tracking_failed",
+                    agent=self.role.value,
+                    project_id=project_id,
+                    task_id=task_id,
+                    error=str(exc),
+                )
+
+        return text_response, tool_calls
 
     # --------------------------------------------------------
     # Message Sending Helpers

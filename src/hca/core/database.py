@@ -207,7 +207,7 @@ class Database:
         """Close the database connection gracefully."""
         if self._db:
             # Checkpoint WAL before closing for clean state
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(aiosqlite.Error):
                 await self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             await self._db.close()
             self._db = None
@@ -326,7 +326,9 @@ class Database:
             return
 
         # Safety assertion: field names MUST come from the static allowlist
-        assert all(k in allowed for k in updates), "BUG: disallowed field in update"
+        if not all(k in allowed for k in updates):
+            msg = f"BUG: disallowed field in update: {set(updates) - allowed}"
+            raise AssertionError(msg)
 
         updates["updated_at"] = datetime.now(UTC).isoformat()
         set_clause = ", ".join(f"{k} = ?" for k in updates)
@@ -628,6 +630,7 @@ class Database:
         if isinstance(payload, dict):
             payload = json.dumps(payload, default=str)
 
+        msg_id = msg.get("id", "unknown")
         try:
             await self.db.execute(
                 """INSERT OR IGNORE INTO messages
@@ -635,12 +638,12 @@ class Database:
                     project_id, task_id, payload, priority)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    msg["id"],
-                    msg["timestamp"],
-                    str(msg["sender"]),
-                    str(msg["recipient"]),
-                    str(msg["type"]),
-                    msg["project_id"],
+                    msg_id,
+                    msg.get("timestamp", ""),
+                    str(msg.get("sender", "")),
+                    str(msg.get("recipient", "")),
+                    str(msg.get("type", "")),
+                    msg.get("project_id", ""),
                     msg.get("task_id", ""),
                     payload,
                     msg.get("priority", "normal"),
@@ -648,7 +651,7 @@ class Database:
             )
             await self.db.commit()
         except aiosqlite.Error as e:
-            logger.error("save_message_failed", error=str(e), msg_id=msg.get("id"))
+            logger.error("save_message_failed", error=str(e), msg_id=msg_id)
 
     async def get_project_messages(
         self,

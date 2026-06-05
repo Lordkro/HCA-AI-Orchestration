@@ -37,10 +37,9 @@ class TestTokenEstimation:
         assert result == 12
 
     def test_estimate_tokens_scales_linearly(self) -> None:
-        short = estimate_tokens("abc")
-        long = estimate_tokens("abc" * 100)
-        # Should be roughly 100x
-        assert long >= short * 90  # Allow some rounding variance
+        short = estimate_tokens("abcde")  # 5 chars → 5 / 3.5 ≈ 1
+        long = estimate_tokens("abcde" * 100)  # 500 chars → 500 / 3.5 ≈ 142
+        assert long >= short * 90  # 142 >= 1 * 90 → meaningful check
 
     def test_estimate_messages_tokens_empty_list(self) -> None:
         result = estimate_messages_tokens([])

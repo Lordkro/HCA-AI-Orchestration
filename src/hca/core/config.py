@@ -46,7 +46,9 @@ class Settings(BaseSettings):
     log_format: str = "json"
 
     # --- Workspace ---
-    workspace_dir: str = "workspace"
+    workspace_dir: str = ".data/workspaces"
+    workspace_retention_days: int = 7  # Clean up workspaces older than 7 days
+    workspace_max_count: int = 100  # Keep only the 100 most recent workspaces
 
     def get_agent_model(self, agent_name: str) -> str:
         """Get the model for a specific agent, falling back to default."""

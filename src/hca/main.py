@@ -2,6 +2,7 @@
 
 import asyncio
 import atexit
+import contextlib
 import fcntl
 import os
 import signal
@@ -34,6 +35,35 @@ async def main() -> None:
     """Start the HCA Orchestration system."""
     setup_logging(log_level=settings.log_level, log_format=settings.log_format)
     logger.info("Starting HCA Orchestration", version="0.1.0")
+
+    # Acquire instance lock BEFORE initializing any resources
+    lock_dir = Path(tempfile.gettempdir()) / "HCA-AI-Orchestration"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "run.lock"
+    lock_file = lock_path.open("w", encoding="utf-8")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        with contextlib.suppress(Exception):
+            existing = lock_path.read_text().strip()
+            logger.error("Another instance is already running; aborting startup.", pid=existing)
+        lock_file.close()
+        return
+
+    # Write PID to lock file so stale locks can be diagnosed
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+
+    def _release_lock() -> None:
+        try:
+            lock_file.close()
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(lock_path)
+            logger.info("Lock file removed, instance shutdown cleanly.")
+        except Exception as e:
+            logger.error("Failed to remove lock file", error=str(e))
+
+    atexit.register(_release_lock)
 
     # Initialize core services
     db = Database(settings.database_url)
@@ -86,30 +116,6 @@ async def main() -> None:
     # Start the web API
     app = create_app(db=db, bus=bus, task_manager=task_manager, agents=agents)
 
-    lock_dir = Path(tempfile.gettempdir()) / "HCA-AI-Orchestration"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / "run.lock"
-    lock_file = lock_path.open("w", encoding="utf-8")
-    try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        logger.error("Another instance is already running; aborting startup.")
-        lock_file.close()
-        await ollama.close()
-        await bus.disconnect()
-        await db.close()
-        return
-
-    def _release_lock() -> None:
-        try:
-            lock_file.close()
-            os.unlink(lock_path)
-            logger.info("Lock file removed, instance shutdown cleanly.")
-        except Exception as e:
-            logger.error("Failed to remove lock file", error=str(e))
-
-    atexit.register(_release_lock)
-
     # Start all agents
     agent_tasks = [asyncio.create_task(agent.start()) for agent in agents]
     pipeline_task = asyncio.create_task(pipeline.start())
@@ -118,7 +124,7 @@ async def main() -> None:
         app,
         host=settings.web_host,
         port=settings.web_port,
-        log_level="info",
+        log_level=settings.log_level.lower(),
     )
     server = uvicorn.Server(config)
 
@@ -164,8 +170,7 @@ async def main() -> None:
     # Graceful shutdown
     logger.info("Shutting down...")
     server.should_exit = True
-    for agent in agents:
-        await agent.stop()
+    await asyncio.gather(*[agent.stop() for agent in agents], return_exceptions=True)
     pipeline.stop()
     await ollama.close()
     await bus.disconnect()

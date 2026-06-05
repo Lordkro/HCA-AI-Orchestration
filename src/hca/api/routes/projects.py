@@ -12,6 +12,7 @@ from hca.core.models import (
     MessageType,
     Project,
 )
+from hca.orchestrator.workspace_manager import WorkspaceManager
 
 router = APIRouter()
 
@@ -126,3 +127,18 @@ async def resume_project(project_id: str, request: Request) -> dict:
         )
     await db.update_project(project_id, status="active")
     return {"project_id": project_id, "status": "active"}
+
+
+# --- Workspace Management ---
+
+
+@router.get("/workspaces/stats")
+async def get_workspace_stats(request: Request) -> dict:
+    """Get workspace usage statistics."""
+    return await WorkspaceManager.get_workspace_stats()
+
+
+@router.post("/workspaces/cleanup")
+async def cleanup_workspaces(request: Request) -> dict:
+    """Manually trigger workspace cleanup based on retention policy."""
+    return await WorkspaceManager.cleanup_old_workspaces()
