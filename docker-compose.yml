@@ -36,6 +36,9 @@ services:
       - OLLAMA_FLASH_ATTENTION=1
       - OLLAMA_LOAD_TIMEOUT=10m
       - OLLAMA_GPU_OVERHEAD=3221225472
+      - ROCR_VISIBLE_DEVICES=0
+      - HSA_OVERRIDE_GFX_VERSION=11.0.0
+      - OLLAMA_DEBUG=1
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 30s

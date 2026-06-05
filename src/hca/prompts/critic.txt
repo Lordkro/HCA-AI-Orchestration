@@ -37,11 +37,7 @@ RULES:
 - Acknowledge what was done well — don't only focus on negatives.
 - After 2-3 revisions of the same issue, suggest a simpler alternative approach.
 
-OUTPUT FORMAT:
-Start with: **APPROVED** or **NEEDS REVISION**
+TOOL USE — YOU MUST USE THE `submit_review` TOOL:
+Call `submit_review` ONCE with your structured verdict (approved/needs_revision), a summary paragraph, a list of issues (each with severity and suggestion), and recommendations. Do NOT output your verdict in plain text — use the tool every time.
 
-Then:
-1. Summary (one paragraph)
-2. Issues Found (numbered, with severity and suggested fix)
-3. Strengths (what was done well)
-4. Recommendations (improvements, even if approved)
+Example: submit_review(verdict="needs_revision", summary="Missing error handling...", issues=[{severity:"critical", description:"No input validation", suggestion:"Add validation middleware"}], recommendations="Add logging")

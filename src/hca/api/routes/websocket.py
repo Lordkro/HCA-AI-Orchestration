@@ -34,7 +34,7 @@ class ConnectionManager:
     async def broadcast(self, message: str) -> None:
         """Send a message to all connected clients."""
         disconnected: list[WebSocket] = []
-        for connection in self.active_connections:
+        for connection in list(self.active_connections):
             try:
                 await connection.send_text(message)
             except Exception:
@@ -71,6 +71,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                         await websocket.send_text(data)
             except asyncio.CancelledError:
                 pass
+            except Exception:
+                pass
 
         redis_task = asyncio.create_task(listen_redis())
 
@@ -83,9 +85,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 cmd = json.loads(data)
                 await websocket.send_text(json.dumps({"type": "ack", "command": cmd}))
             except json.JSONDecodeError:
-                pass
-            # Prevent tight loop when client silent
-            await asyncio.sleep(0.1)
+                # Prevent tight loop on invalid input
+                await asyncio.sleep(0.1)
 
     except WebSocketDisconnect:
         pass

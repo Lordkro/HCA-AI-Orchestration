@@ -78,6 +78,27 @@ class MockOllamaClient:
         )
         return self.default_response
 
+    async def chat_with_tools(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict],
+        *,
+        model: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        auto_trim: bool = True,
+    ) -> tuple[str, list[dict]]:
+        self.chat_calls.append(
+            {
+                "messages": messages,
+                "tools": tools,
+                "model": model,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+        )
+        return self.default_response, []
+
     async def generate(self, prompt: str, **kwargs: Any) -> str:
         self.generate_calls.append({"prompt": prompt, **kwargs})
         return self.default_response

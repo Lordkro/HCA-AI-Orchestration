@@ -23,6 +23,7 @@ from hca.core.models import (
     TaskState,
 )
 from hca.core.ollama_client import OllamaClient
+from hca.core.tools import CREATE_TASK_TOOL
 
 logger = structlog.get_logger()
 
@@ -72,48 +73,16 @@ class PMAgent(BaseAgent):
                 return None
 
     async def _handle_new_project(self, message: AgentMessage) -> AgentMessage | None:
-        """Break down a new product idea into a project plan.
-
-        The project has already been created by the API route and its ID
-        is carried in ``message.project_id``.  The PM:
-
-        1. Asks the LLM to decompose the idea into structured tasks.
-        2. Parses the LLM output into ``Task`` records and persists them
-           via ``TaskManager``.
-        3. Assigns the first pending task to kick off the pipeline.
-        """
+        """Break down a new product idea into a project plan."""
         idea = message.payload.content
         project_id = message.project_id
 
-        # Ask the LLM to decompose the idea into tasks
         prompt = f"""A user has submitted a new product idea for our AI development team to build.
 
 PRODUCT IDEA:
 {idea}
 
-Please analyze this idea and create a detailed project plan.
-
-OUTPUT FORMAT — you MUST use this exact format for each task:
-
-TASK: <concise title>
-AGENT: <research|spec|coder|critic>
-PRIORITY: <low|normal|high|critical>
-DEPENDS_ON: <comma-separated titles of tasks this depends on, or "none">
-DESCRIPTION: <detailed description on one or more lines, until the next TASK: or end>
-
-Example:
-TASK: Investigate auth libraries
-AGENT: research
-PRIORITY: high
-DEPENDS_ON: none
-DESCRIPTION: Research the best authentication libraries for a Python REST API.
-Compare JWT, session-based, and OAuth2 approaches.
-
-TASK: Write API specification
-AGENT: spec
-PRIORITY: normal
-DEPENDS_ON: Investigate auth libraries
-DESCRIPTION: Based on the research results, write a detailed API specification.
+Please analyze this idea and create a detailed project plan. Use the `create_task` tool ONCE PER TASK to define the tasks.
 
 Important rules:
 - Start with research tasks, then specification, then coding tasks.
@@ -121,67 +90,109 @@ Important rules:
 - Each task must be self-contained and detailed enough for the assigned agent.
 - Order tasks by dependency (earlier tasks should be done first).
 - Typically a project needs 1–3 research tasks, 1–2 spec tasks, and 1–3 coding tasks.
+- Use the `depends_on_titles` field to specify task dependencies using the exact titles of other tasks.
+- For tasks with no dependencies, set depends_on_titles to an empty list.
 
 Think step by step about what needs to be built and in what order."""
 
         self._set_activity("Decomposing project idea into tasks")
-        response = await self.think(prompt, project_id=project_id)
+        response, tool_calls = await self.think_with_tools(
+            prompt, [CREATE_TASK_TOOL], project_id=project_id
+        )
 
         self._set_activity("Parsing tasks from LLM response")
-        # Parse the LLM output into Task records
-        tasks = self._parse_tasks(response, project_id)
+        created_tasks: list[Task] = []
 
-        if not tasks and self.task_manager:
-            # Fallback: create a single research task from the raw plan
-            logger.warning(
-                "pm_task_parse_fallback",
-                project_id=project_id,
-            )
-            tasks = [
-                await self.task_manager.create_task(
-                    project_id=project_id,
-                    title="Research and plan",
-                    description=f"Research the following idea and produce a report:\n\n{idea}",
-                    assigned_to=AgentRole.RESEARCH,
-                ),
-            ]
-        elif self.task_manager:
-            # Two-pass creation: first create all tasks, then resolve deps
+        if tool_calls and self.task_manager:
+            # Tool calling path: create tasks from tool call arguments
             title_to_id: dict[str, str] = {}
-            persisted: list[tuple[dict, Task]] = []
-            for t in tasks:
+            call_args: list[tuple[dict, str]] = []
+
+            for call in tool_calls:
+                if call["name"] != "create_task":
+                    continue
+                args = call["arguments"]
+                title = args.get("title", "").strip()
+                description = args.get("description", "").strip()
+                agent_str = args.get("assigned_to", "").strip()
+                priority = args.get("priority", "normal")
+
+                if not title or not description or not agent_str:
+                    logger.warning("pm_skipping_incomplete_task", args=args)
+                    continue
+
                 try:
-                    created = await self.task_manager.create_task(
-                        project_id=project_id,
-                        title=str(t["title"]),
-                        description=str(t["description"]),
-                        assigned_to=AgentRole(str(t["agent"])),
-                    )
-                    title_to_id[str(t["title"]).lower()] = created.id
-                    persisted.append((t, created))
-                except (ValueError, KeyError) as exc:
-                    logger.warning(
-                        "pm_task_create_skipped",
-                        title=t.get("title", "?"),
-                        reason=str(exc),
-                    )
+                    agent = AgentRole(agent_str)
+                except ValueError:
+                    logger.warning("pm_skipping_invalid_agent", agent=agent_str)
+                    continue
 
-            # Second pass: resolve depends_on titles → IDs
-            for task_dict, task_obj in persisted:
-                dep_titles = task_dict.get("depends_on_titles", [])
+                created = await self.task_manager.create_task(
+                    project_id=project_id,
+                    title=title,
+                    description=description,
+                    assigned_to=agent,
+                )
+                created.priority = priority  # type: ignore[assignment]
+                title_to_id[title.lower()] = created.id
+                call_args.append((args, created.id))
+                created_tasks.append(created)
+
+            # Second pass: resolve depends_on
+            for args, task_id in call_args:
+                dep_titles = args.get("depends_on_titles", [])
                 if dep_titles and isinstance(dep_titles, list):
-                    dep_ids = []
-                    for dep_title in dep_titles:
-                        dep_id = title_to_id.get(dep_title.lower())
-                        if dep_id:
-                            dep_ids.append(dep_id)
+                    dep_ids = [
+                        tid for t in dep_titles
+                        if (tid := title_to_id.get(t.lower().strip()))
+                    ]
                     if dep_ids:
-                        task_obj.depends_on = dep_ids
-                        await self.db.update_task(task_obj)
+                        task_obj = next((t for t in created_tasks if t.id == task_id), None)
+                        if task_obj:
+                            task_obj.depends_on = dep_ids
+                            await self.db.update_task(task_obj)
 
-            tasks = [task_obj for _, task_obj in persisted]  # type: ignore[assignment]
+        if not created_tasks:
+            # Fallback: try regex parsing
+            tasks = self._parse_tasks(response or "", project_id)
+            if tasks and self.task_manager:
+                title_to_id = {}
+                persisted: list[tuple[dict, Task]] = []
+                for t in tasks:
+                    try:
+                        created = await self.task_manager.create_task(
+                            project_id=project_id,
+                            title=str(t["title"]),
+                            description=str(t["description"]),
+                            assigned_to=AgentRole(str(t["agent"])),
+                        )
+                        title_to_id[str(t["title"]).lower()] = created.id
+                        persisted.append((t, created))
+                    except (ValueError, KeyError) as exc:
+                        logger.warning("pm_task_create_skipped", title=t.get("title", "?"), reason=str(exc))
 
-        # Kick off the first pending task
+                for task_dict, task_obj in persisted:
+                    dep_titles = task_dict.get("depends_on_titles", [])
+                    if dep_titles and isinstance(dep_titles, list):
+                        dep_ids = [title_to_id[d.lower()] for d in dep_titles if d.lower() in title_to_id]
+                        if dep_ids:
+                            task_obj.depends_on = dep_ids
+                            await self.db.update_task(task_obj)
+
+                created_tasks = [task_obj for _, task_obj in persisted]
+
+            if not created_tasks and self.task_manager:
+                # Last resort: create a single research task
+                logger.warning("pm_task_parse_fallback", project_id=project_id)
+                created_tasks = [
+                    await self.task_manager.create_task(
+                        project_id=project_id,
+                        title="Research and plan",
+                        description=f"Research the following idea and produce a report:\n\n{idea}",
+                        assigned_to=AgentRole.RESEARCH,
+                    ),
+                ]
+
         return await self._assign_next_task(project_id)
 
     # ------------------------------------------------------------------

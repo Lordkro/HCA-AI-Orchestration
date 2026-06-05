@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import structlog
 from hca.agents.base_agent import BaseAgent
 from hca.core.database import Database
@@ -12,6 +14,7 @@ from hca.core.models import (
     MessageType,
 )
 from hca.core.ollama_client import OllamaClient
+from hca.core.tools import SUBMIT_REVIEW_TOOL
 
 logger = structlog.get_logger()
 
@@ -51,15 +54,12 @@ class CriticAgent(BaseAgent):
 
     async def _handle_review_task(self, message: AgentMessage) -> AgentMessage | None:
         """Review a deliverable (code, spec, or research)."""
-        # Preserve the original artifact_type so the PM can route feedback
-        # back to the correct agent if revision is needed.
         original_artifact_type = message.payload.metadata.get("artifact_type", "unknown")
-        artifact_type = original_artifact_type
-        self._set_activity(f"Reviewing {artifact_type} from {message.sender.value}")
+        self._set_activity(f"Reviewing {original_artifact_type} from {message.sender.value}")
 
         prompt = f"""You are reviewing a deliverable from the {message.sender.value} agent.
 
-ARTIFACT TYPE: {artifact_type}
+ARTIFACT TYPE: {original_artifact_type}
 DELIVERABLE:
 {message.payload.content}
 
@@ -89,40 +89,56 @@ Perform a thorough review. Check for:
 - Relevance: Is the research relevant to the project?
 - Actionability: Can the team act on the recommendations?
 
-OUTPUT FORMAT:
-Start with a verdict: **APPROVED** or **NEEDS REVISION**
+Use the `submit_review` tool to provide your structured verdict. Be constructive but thorough.
+Do not approve work that has critical or major issues."""
 
-Then provide:
-1. **Summary**: One-paragraph overall assessment
-2. **Issues Found**: Numbered list of specific issues (if any)
-   - For each issue: severity (critical/major/minor), description, and suggested fix
-3. **Strengths**: What was done well
-4. **Recommendations**: Specific improvements (even if approved)
-
-Be constructive but thorough. Do not approve work that has critical or major issues."""
-
-        response = await self.think(
-            prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.3
+        response, tool_calls = await self.think_with_tools(
+            prompt, [SUBMIT_REVIEW_TOOL],
+            project_id=message.project_id, task_id=message.task_id,
+            temperature=0.3,
         )
 
-        # Determine if approved or needs revision.
-        # Check the first few lines for the verdict (LLMs may add a short preamble).
-        response_upper = response.upper()
-        first_lines = "\n".join(response.split("\n")[:5]).upper()
-        is_approved = (
-            "**APPROVED**" in first_lines
-            or first_lines.lstrip().startswith("APPROVED")
-            # Fallback: scan the full response only if "NEEDS REVISION" is absent
-            or ("APPROVED" in response_upper and "NEEDS REVISION" not in response_upper)
-        )
+        # Extract verdict from tool calls
+        verdict = ""
+        review_content = response
+        for call in tool_calls:
+            if call["name"] == "submit_review":
+                args = call["arguments"]
+                verdict = args.get("verdict", "")
+                summary = args.get("summary", "")
+                issues = args.get("issues", [])
+                recommendations = args.get("recommendations", "")
+                # Build a structured review text from the tool arguments
+                parts = [f"# Review: {verdict.upper()}", "", summary]
+                if issues:
+                    parts.append("")
+                    parts.append("## Issues Found")
+                    for i, issue in enumerate(issues, 1):
+                        sev = issue.get("severity", "unknown")
+                        desc = issue.get("description", "")
+                        sug = issue.get("suggestion", "")
+                        parts.append(f"{i}. [{sev}] {desc}")
+                        if sug:
+                            parts.append(f"   Suggestion: {sug}")
+                if recommendations:
+                    parts.append("")
+                    parts.append(f"## Recommendations\n{recommendations}")
+                review_content = "\n".join(parts)
+                break
 
-        if is_approved:
+        # Fallback: string matching if no tool call was made
+        if not verdict:
+            first_lines = "\n".join((response or "").split("\n")[:5]).upper()
+            is_approved = "**APPROVED**" in first_lines or first_lines.lstrip().startswith("APPROVED")
+            verdict = "approved" if is_approved else "needs_revision"
+
+        if verdict == "approved":
             return self.create_message(
                 recipient=AgentRole.PM,
                 msg_type=MessageType.DELIVERABLE,
                 project_id=message.project_id,
                 task_id=message.task_id,
-                content=response,
+                content=review_content,
                 metadata={
                     "review_result": "approved",
                     "artifact_type": original_artifact_type,
@@ -134,7 +150,7 @@ Be constructive but thorough. Do not approve work that has critical or major iss
                 msg_type=MessageType.FEEDBACK,
                 project_id=message.project_id,
                 task_id=message.task_id,
-                content=response,
+                content=review_content,
                 metadata={
                     "review_result": "needs_revision",
                     "artifact_type": original_artifact_type,

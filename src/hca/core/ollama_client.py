@@ -648,6 +648,109 @@ class OllamaClient:
         raise OllamaError(f"Streaming request failed after all retries: {last_error}")
 
     # --------------------------------------------------------
+    # Tool Calling (function calling)
+    # --------------------------------------------------------
+
+    async def chat_with_tools(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict],
+        *,
+        model: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        auto_trim: bool = True,
+    ) -> tuple[str, list[dict]]:
+        """Chat completion with tool/function calling support.
+
+        Uses non-streaming mode (tools require ``stream: false``).
+        Returns (text_response, tool_calls) where tool_calls is a list
+        of ``{"name": str, "arguments": dict}`` dicts.
+
+        Args:
+            messages: Chat messages (role + content).
+            tools: Tool definitions in Ollama/OpenAI function-calling format.
+            model: Model override.
+            temperature: Sampling temperature.
+            max_tokens: Max tokens to generate.
+            auto_trim: If True, trim messages to fit context window.
+        """
+        model = model or self.default_model
+
+        if auto_trim:
+            messages = self.trim_messages_to_fit(messages, max_completion=max_tokens)
+
+        payload: dict = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "tools": tools,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+                "num_ctx": self.num_ctx,
+            },
+        }
+
+        input_tokens_est = estimate_messages_tokens(messages)
+        logger.info(
+            "ollama_chat_with_tools_start",
+            model=model,
+            message_count=len(messages),
+            tool_count=len(tools),
+            estimated_input_tokens=input_tokens_est,
+        )
+
+        start = time.monotonic()
+        response = await self._request_with_retry("POST", "/api/chat", json_data=payload)
+        elapsed = time.monotonic() - start
+        data = response.json()
+
+        message = data.get("message", {})
+        text = message.get("content", "").strip()
+
+        # Strip think blocks from text portion
+        text = re.sub(r"<think>[\s\S]*?</think>\s*", "", text).strip()
+
+        # Extract tool calls
+        raw_calls = message.get("tool_calls", [])
+        tool_calls: list[dict] = []
+        for call in raw_calls:
+            func = call.get("function", {})
+            name = func.get("name", "")
+            raw_args = func.get("arguments", {})
+            if isinstance(raw_args, str):
+                try:
+                    raw_args = json.loads(raw_args)
+                except (json.JSONDecodeError, TypeError):
+                    raw_args = {}
+            tool_calls.append({"name": name, "arguments": raw_args})
+
+        eval_count = data.get("eval_count", estimate_tokens(text))
+        prompt_eval_count = data.get("prompt_eval_count", input_tokens_est)
+
+        stats = GenerationStats(
+            model=model,
+            prompt_tokens=prompt_eval_count,
+            completion_tokens=eval_count,
+            total_tokens=prompt_eval_count + eval_count,
+            duration_seconds=elapsed,
+            tokens_per_second=eval_count / elapsed if elapsed > 0 else 0,
+        )
+        self.stats.record(stats)
+
+        logger.info(
+            "ollama_chat_with_tools_complete",
+            model=model,
+            response_len=len(text),
+            tool_call_count=len(tool_calls),
+            prompt_tokens=stats.prompt_tokens,
+            completion_tokens=stats.completion_tokens,
+            duration_s=round(elapsed, 2),
+        )
+        return text, tool_calls
+
+    # --------------------------------------------------------
     # Model Management
     # --------------------------------------------------------
 

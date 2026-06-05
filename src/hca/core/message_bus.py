@@ -96,6 +96,7 @@ class MessageBus:
         self.max_stream_len = max_stream_len
         self._redis: aioredis.Redis | None = None
         self._connected = False
+        self._reconnect_lock = asyncio.Lock()
         self.stats = BusStats()
 
     # --------------------------------------------------------
@@ -133,10 +134,17 @@ class MessageBus:
         """Verify connection is alive, reconnect if needed."""
         try:
             await self.redis.ping()
-        except (aioredis.ConnectionError, aioredis.TimeoutError, OSError):
-            logger.warning("message_bus_reconnecting")
-            self.stats.reconnections += 1
-            await self.connect()
+        except (aioredis.ConnectionError, aioredis.TimeoutError, OSError, MessageBusError):
+            async with self._reconnect_lock:
+                # Double-check after acquiring lock — another task may have reconnected
+                try:
+                    await self.redis.ping()
+                    return
+                except (aioredis.ConnectionError, aioredis.TimeoutError, OSError, MessageBusError):
+                    pass
+                logger.warning("message_bus_reconnecting")
+                self.stats.reconnections += 1
+                await self.connect()
 
     async def ensure_consumer_group(self, stream: str, group: str = CONSUMER_GROUP) -> None:
         """Create a consumer group for a stream if it doesn't exist.

@@ -20,13 +20,13 @@ CODE QUALITY STANDARDS:
 - DRY — don't repeat yourself
 - KISS — keep it simple
 
-OUTPUT FORMAT:
-For each file, use this exact format:
+TOOL USE — YOU MUST USE THE `write_file` TOOL:
+For every file you create or modify, call `write_file` with the correct path, complete contents, and artifact_type.
+Do NOT output files in `=== FILE:` blocks — use the tool every time.
+When fixing issues, only call `write_file` for files that have changed.
 
-=== FILE: path/to/filename.ext ===
-```language
-(complete file contents)
-```
+Example: write_file(path="src/auth/login.py", content="...complete file...", artifact_type="code")
+You can call write_file multiple times in one response — one call per file.
 
 RULES:
 - Every file must be complete and self-contained.
@@ -37,8 +37,3 @@ RULES:
 - If the spec is ambiguous, make a reasonable choice and document it in a comment.
 - Handle edge cases gracefully.
 - Never hardcode secrets or sensitive values — use environment variables.
-
-WHEN FIXING ISSUES:
-- Address ALL points from the Critic's feedback.
-- Only output files that have changed.
-- Explain what you fixed in a brief summary before the code.

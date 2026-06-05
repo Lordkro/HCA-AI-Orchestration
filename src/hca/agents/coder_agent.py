@@ -18,6 +18,7 @@ from hca.core.models import (
     TaskState,
 )
 from hca.core.ollama_client import OllamaClient
+from hca.core.tools import WRITE_FILE_TOOL
 
 logger = structlog.get_logger()
 
@@ -63,7 +64,6 @@ class CoderAgent(BaseAgent):
 
     async def _handle_coding_task(self, message: AgentMessage) -> AgentMessage | None:
         """Generate code based on the specification."""
-        # Transition task: ASSIGNED → IN_PROGRESS
         await self._transition_task(message.task_id, TaskState.IN_PROGRESS)
         self._set_activity("Writing implementation code")
 
@@ -79,19 +79,7 @@ RULES:
 4. Write clean, well-documented code with docstrings.
 5. Include type hints for all functions.
 6. Generate unit tests for critical functionality.
-
-OUTPUT FORMAT:
-For each file you create, use this exact format:
-
-=== FILE: path/to/filename.ext ===
-```language
-(file contents here)
-```
-
-=== FILE: path/to/another_file.ext ===
-```language
-(file contents here)
-```
+7. Use the `write_file` tool for EVERY file you create. Call it once per file.
 
 Create ALL necessary files for a working implementation. Include:
 - Source code files
@@ -100,16 +88,22 @@ Create ALL necessary files for a working implementation. Include:
 - Requirements/dependency files (if needed)
 - README or usage notes"""
 
-        response = await self.think(
-            prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.4
+        response, tool_calls = await self.think_with_tools(
+            prompt, [WRITE_FILE_TOOL], project_id=message.project_id,
+            task_id=message.task_id, temperature=0.4,
         )
 
-        # Parse and save artifacts
-        artifacts = self._parse_file_outputs(response, message.project_id, message.task_id)
-        for artifact in artifacts:
-            await self.db.create_artifact(artifact)
-            # Also write to the workspace filesystem
-            await self._write_to_workspace(artifact, message.project_id)
+        # Process tool calls first
+        artifacts = await self._process_write_file_calls(
+            tool_calls, message.project_id, message.task_id
+        )
+
+        # Fall back to regex parsing if no tool calls were made
+        if not artifacts and response:
+            artifacts = self._parse_file_outputs(response, message.project_id, message.task_id)
+            for artifact in artifacts:
+                await self.db.create_artifact(artifact)
+                await self._write_to_workspace(artifact, message.project_id)
 
         artifact_names = [a.filename for a in artifacts]
 
@@ -118,10 +112,41 @@ Create ALL necessary files for a working implementation. Include:
             msg_type=MessageType.DELIVERABLE,
             project_id=message.project_id,
             task_id=message.task_id,
-            content=response,
+            content=response or f"Created {len(artifacts)} files",
             artifacts=artifact_names,
             metadata={"artifact_type": "code", "file_count": str(len(artifacts))},
         )
+
+    async def _process_write_file_calls(
+        self, tool_calls: list[dict], project_id: str, task_id: str
+    ) -> list[Artifact]:
+        """Process write_file tool calls into artifacts and write to workspace."""
+        artifacts: list[Artifact] = []
+        for call in tool_calls:
+            if call["name"] != "write_file":
+                continue
+            args = call["arguments"]
+            path = args.get("path", "").strip()
+            content = args.get("content", "")
+            artifact_type = args.get("artifact_type", "code")
+
+            if not path or not content:
+                logger.warning("coder_skipping_empty_write_file", args=args)
+                continue
+
+            artifact = Artifact(
+                project_id=project_id,
+                task_id=task_id,
+                agent=AgentRole.CODER,
+                filename=path,
+                content=content,
+                artifact_type=artifact_type,
+            )
+            await self.db.create_artifact(artifact)
+            await self._write_to_workspace(artifact, project_id)
+            artifacts.append(artifact)
+
+        return artifacts
 
     async def _handle_feedback(self, message: AgentMessage) -> AgentMessage | None:
         """Fix code based on Critic feedback."""
@@ -131,30 +156,29 @@ Create ALL necessary files for a working implementation. Include:
 FEEDBACK:
 {message.payload.content}
 
-Address ALL issues mentioned in the feedback. Output the complete corrected files using the same format:
+Address ALL issues mentioned in the feedback. Use the `write_file` tool for each file you need to correct. Only output files that have changed."""
 
-=== FILE: path/to/filename.ext ===
-```language
-(corrected file contents)
-```
-
-Only output files that have changed."""
-
-        response = await self.think(
-            prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.3
+        response, tool_calls = await self.think_with_tools(
+            prompt, [WRITE_FILE_TOOL], project_id=message.project_id,
+            task_id=message.task_id, temperature=0.3,
         )
 
-        artifacts = self._parse_file_outputs(response, message.project_id, message.task_id)
-        for artifact in artifacts:
-            await self.db.create_artifact(artifact)
-            await self._write_to_workspace(artifact, message.project_id)
+        artifacts = await self._process_write_file_calls(
+            tool_calls, message.project_id, message.task_id
+        )
+
+        if not artifacts and response:
+            artifacts = self._parse_file_outputs(response, message.project_id, message.task_id)
+            for artifact in artifacts:
+                await self.db.create_artifact(artifact)
+                await self._write_to_workspace(artifact, message.project_id)
 
         return self.create_message(
             recipient=AgentRole.PM,
             msg_type=MessageType.DELIVERABLE,
             project_id=message.project_id,
             task_id=message.task_id,
-            content=response,
+            content=response or f"Fixed {len(artifacts)} files",
             artifacts=[a.filename for a in artifacts],
             metadata={"artifact_type": "code", "revision": "true"},
         )
@@ -283,6 +307,12 @@ Provide a clear answer with code examples if needed."""
 
     async def _write_to_workspace(self, artifact: Artifact, project_id: str) -> None:
         """Write an artifact to the workspace filesystem."""
+        # Validate project_id for path traversal
+        if not project_id or "/" in project_id or "\\" in project_id or ".." in project_id:
+            raise WorkspaceWriteError(
+                f"Invalid project_id (path traversal blocked): {project_id}"
+            )
+
         workspace_root = Path(settings.workspace_dir)
         try:
             workspace_root.mkdir(parents=True, exist_ok=True)

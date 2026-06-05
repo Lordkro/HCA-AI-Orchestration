@@ -52,12 +52,12 @@ class Guardrails:
         project_token_budget: int | None = None,
         activity_timeout: int | None = None,
     ) -> None:
-        self.max_iterations = max_iterations or settings.max_iterations_per_task
-        self.max_tasks = max_tasks or settings.max_tasks_per_project
-        self.task_timeout_minutes = task_timeout or settings.task_timeout_minutes
-        self.project_timeout_minutes = project_timeout or settings.project_timeout_minutes
-        self.project_token_budget = project_token_budget or settings.project_token_budget
-        self.activity_timeout_minutes = activity_timeout or settings.activity_timeout_minutes
+        self.max_iterations = max_iterations if max_iterations is not None else settings.max_iterations_per_task
+        self.max_tasks = max_tasks if max_tasks is not None else settings.max_tasks_per_project
+        self.task_timeout_minutes = task_timeout if task_timeout is not None else settings.task_timeout_minutes
+        self.project_timeout_minutes = project_timeout if project_timeout is not None else settings.project_timeout_minutes
+        self.project_token_budget = project_token_budget if project_token_budget is not None else settings.project_token_budget
+        self.activity_timeout_minutes = activity_timeout if activity_timeout is not None else settings.activity_timeout_minutes
 
     # --------------------------------------------------------
     # Iteration Limit
