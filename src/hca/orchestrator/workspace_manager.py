@@ -4,6 +4,7 @@ Handles:
 - Retention policies (max age, max count)
 - Cleanup of old/orphaned workspaces
 - Metrics on workspace usage
+- Git integration per project workspace
 """
 
 from __future__ import annotations
@@ -22,6 +23,142 @@ logger = structlog.get_logger()
 
 class WorkspaceManager:
     """Manages workspace lifecycle and cleanup."""
+
+    @staticmethod
+    def _workspace_path(project_id: str) -> Path:
+        """Get the filesystem path for a project workspace."""
+        root = Path(settings.workspace_dir)
+        if not root.exists():
+            root.mkdir(parents=True, exist_ok=True)
+        return (root / project_id).resolve()
+
+    @staticmethod
+    async def init_project_repo(project_id: str) -> bool:
+        """Initialise a git repository in the project workspace.
+
+        Safe to call multiple times — skips if .git already exists.
+        Returns True if a new repo was initialised.
+        """
+        ws = WorkspaceManager._workspace_path(project_id)
+        if not ws.exists():
+            ws.mkdir(parents=True, exist_ok=True)
+
+        git_dir = ws / ".git"
+        if git_dir.exists():
+            return False  # Already a repo
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "init",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=str(ws),
+            )
+            rc = await proc.wait()
+            if rc != 0:
+                logger.warning("git_init_failed", project_id=project_id, returncode=rc)
+                return False
+
+            # Set local git config for commit authorship
+            await asyncio.create_subprocess_exec(
+                "git", "config", "user.name", "HCA Agent",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=str(ws),
+            )
+            await asyncio.create_subprocess_exec(
+                "git", "config", "user.email", "agent@hca.local",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=str(ws),
+            )
+
+            logger.info("git_repo_initialised", project_id=project_id)
+            return True
+        except FileNotFoundError:
+            logger.warning("git_not_available", project_id=project_id)
+            return False
+
+    @staticmethod
+    async def commit_workspace(project_id: str, message: str) -> bool:
+        """Stage all changes and commit to the project git repo.
+
+        Returns True if a commit was made (has changes), False otherwise.
+        """
+        ws = WorkspaceManager._workspace_path(project_id)
+        if not (ws / ".git").exists():
+            inited = await WorkspaceManager.init_project_repo(project_id)
+            if not inited:
+                return False
+
+        try:
+            # git add -A
+            add_proc = await asyncio.create_subprocess_exec(
+                "git", "add", "-A",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=str(ws),
+            )
+            rc_add = await add_proc.wait()
+            if rc_add != 0:
+                logger.warning("git_add_failed", project_id=project_id, returncode=rc_add)
+                return False
+
+            # Check if anything changed
+            diff_proc = await asyncio.create_subprocess_exec(
+                "git", "diff", "--cached", "--quiet",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=str(ws),
+            )
+            rc_diff = await diff_proc.wait()
+            if rc_diff == 0:
+                # No changes to commit
+                return False
+
+            # git commit
+            commit_proc = await asyncio.create_subprocess_exec(
+                "git", "commit", "-m", message,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=str(ws),
+            )
+            rc_commit = await commit_proc.wait()
+            if rc_commit != 0:
+                logger.warning("git_commit_failed", project_id=project_id, returncode=rc_commit)
+                return False
+
+            logger.info("git_commit_created", project_id=project_id, message=message)
+            return True
+        except FileNotFoundError:
+            logger.warning("git_not_available", project_id=project_id)
+            return False
+
+    @staticmethod
+    async def get_workspace_diff(project_id: str) -> str:
+        """Get the git diff of uncommitted changes in the project workspace.
+
+        Returns empty string if no diff or git is unavailable.
+        """
+        ws = WorkspaceManager._workspace_path(project_id)
+        if not (ws / ".git").exists():
+            return ""
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "diff",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=str(ws),
+            )
+            stdout, _ = await proc.communicate()
+            return stdout.decode("utf-8", errors="replace").strip()
+        except FileNotFoundError:
+            return ""
+
+    # ---------------------------------------------------------------
+    # Cleanup
+    # ---------------------------------------------------------------
 
     @staticmethod
     async def cleanup_old_workspaces() -> dict[str, int]:

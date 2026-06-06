@@ -19,7 +19,8 @@ from hca.core.models import (
     TaskState,
 )
 from hca.core.ollama_client import OllamaClient
-from hca.core.tools import WRITE_FILE_TOOL
+from hca.core.tools import WRITE_FILE_TOOL, format_validation_errors, validate_and_log
+from hca.orchestrator.workspace_manager import WorkspaceManager
 
 logger = structlog.get_logger()
 
@@ -89,15 +90,48 @@ Create ALL necessary files for a working implementation. Include:
 - Requirements/dependency files (if needed)
 - README or usage notes"""
 
+        tool_defs = [WRITE_FILE_TOOL]
         response, tool_calls = await self.think_with_tools(
-            prompt, [WRITE_FILE_TOOL], project_id=message.project_id,
+            prompt, tool_defs, project_id=message.project_id,
             task_id=message.task_id, temperature=0.4,
         )
 
-        # Process tool calls first
-        artifacts = await self._process_write_file_calls(
-            tool_calls, message.project_id, message.task_id
+        # Validate tool calls and retry if needed
+        valid_calls, errors = validate_and_log(
+            tool_calls, tool_defs, agent_name=self.role.value
         )
+        if errors:
+            logger.warning(
+                "coder_invalid_tool_calls",
+                task_id=message.task_id,
+                error_count=len(errors),
+            )
+            fix_prompt = f"""{format_validation_errors(errors)}
+
+Original task:
+{message.payload.content[:500]}
+
+Please call write_file again with corrected arguments."""
+            response, tool_calls = await self.think_with_tools(
+                fix_prompt, tool_defs, project_id=message.project_id,
+                task_id=message.task_id, temperature=0.3,
+            )
+            valid_calls, errors = validate_and_log(
+                tool_calls, tool_defs, agent_name=self.role.value
+            )
+
+        # Process validated tool calls
+        artifacts = await self._process_write_file_calls(
+            valid_calls, message.project_id, message.task_id
+        )
+
+        # Init git repo and commit
+        if artifacts:
+            await WorkspaceManager.init_project_repo(message.project_id)
+            await WorkspaceManager.commit_workspace(
+                message.project_id,
+                f"Coding iteration for task {message.task_id}",
+            )
 
         # Fall back to regex parsing if no tool calls were made
         if not artifacts and response:
@@ -152,21 +186,63 @@ Create ALL necessary files for a working implementation. Include:
     async def _handle_feedback(self, message: AgentMessage) -> AgentMessage | None:
         """Fix code based on Critic feedback."""
         self._set_activity("Fixing code based on review feedback")
+
+        # Get previous diff to provide context
+        diff_context = ""
+        try:
+            prev_diff = await WorkspaceManager.get_workspace_diff(message.project_id)
+            if prev_diff:
+                diff_context = f"\n\nCURRENT CHANGES SINCE LAST COMMIT:\n{prev_diff}\n"
+        except Exception as exc:
+            logger.debug("diff_context_unavailable", error=str(exc))
+
         prompt = f"""Your code received feedback from the Critic. Please fix the issues.
 
 FEEDBACK:
-{message.payload.content}
+{message.payload.content}{diff_context}
 
 Address ALL issues mentioned in the feedback. Use the `write_file` tool for each file you need to correct. Only output files that have changed."""
 
+        tool_defs = [WRITE_FILE_TOOL]
         response, tool_calls = await self.think_with_tools(
-            prompt, [WRITE_FILE_TOOL], project_id=message.project_id,
+            prompt, tool_defs, project_id=message.project_id,
             task_id=message.task_id, temperature=0.3,
         )
 
-        artifacts = await self._process_write_file_calls(
-            tool_calls, message.project_id, message.task_id
+        # Validate tool calls and retry if needed
+        valid_calls, errors = validate_and_log(
+            tool_calls, tool_defs, agent_name=self.role.value
         )
+        if errors:
+            logger.warning(
+                "coder_feedback_invalid_tool_calls",
+                task_id=message.task_id,
+                error_count=len(errors),
+            )
+            fix_prompt = f"""{format_validation_errors(errors)}
+
+Original feedback:
+{message.payload.content[:500]}
+
+Please call write_file with corrected arguments."""
+            response, tool_calls = await self.think_with_tools(
+                fix_prompt, tool_defs, project_id=message.project_id,
+                task_id=message.task_id, temperature=0.3,
+            )
+            valid_calls, errors = validate_and_log(
+                tool_calls, tool_defs, agent_name=self.role.value
+            )
+
+        artifacts = await self._process_write_file_calls(
+            valid_calls, message.project_id, message.task_id
+        )
+
+        # Commit changes
+        if artifacts:
+            await WorkspaceManager.commit_workspace(
+                message.project_id,
+                f"Revision for task {message.task_id}",
+            )
 
         if not artifacts and response:
             artifacts = self._parse_file_outputs(response, message.project_id, message.task_id)

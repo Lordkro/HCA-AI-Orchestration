@@ -13,7 +13,7 @@ from hca.core.models import (
     MessageType,
 )
 from hca.core.ollama_client import OllamaClient
-from hca.core.tools import SUBMIT_REVIEW_TOOL
+from hca.core.tools import SUBMIT_REVIEW_TOOL, format_validation_errors, validate_and_log
 
 logger = structlog.get_logger()
 
@@ -91,16 +91,38 @@ Perform a thorough review. Check for:
 Use the `submit_review` tool to provide your structured verdict. Be constructive but thorough.
 Do not approve work that has critical or major issues."""
 
+        tool_defs = [SUBMIT_REVIEW_TOOL]
         response, tool_calls = await self.think_with_tools(
-            prompt, [SUBMIT_REVIEW_TOOL],
+            prompt, tool_defs,
             project_id=message.project_id, task_id=message.task_id,
             temperature=0.3,
         )
 
-        # Extract verdict from tool calls
+        # Validate tool calls and retry if needed
+        valid_calls, errors = validate_and_log(
+            tool_calls, tool_defs, agent_name=self.role.value
+        )
+        if errors:
+            logger.warning(
+                "critic_invalid_tool_calls",
+                task_id=message.task_id,
+                error_count=len(errors),
+            )
+            fix_prompt = f"""{format_validation_errors(errors)}
+
+Please submit your review again with corrected arguments."""
+            response, tool_calls = await self.think_with_tools(
+                fix_prompt, tool_defs, project_id=message.project_id,
+                task_id=message.task_id, temperature=0.3,
+            )
+            valid_calls, errors = validate_and_log(
+                tool_calls, tool_defs, agent_name=self.role.value
+            )
+
+        # Extract verdict from validated tool calls
         verdict = ""
         review_content = response
-        for call in tool_calls:
+        for call in valid_calls:
             if call["name"] == "submit_review":
                 args = call["arguments"]
                 verdict = args.get("verdict", "")

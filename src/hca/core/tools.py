@@ -4,6 +4,8 @@ Each tool is a dict in the Ollama/OpenAI function-calling format:
 https://github.com/ollama/ollama/blob/main/docs/openai.md#tool-calls
 """
 
+from __future__ import annotations
+
 CREATE_TASK_TOOL: dict = {
     "type": "function",
     "function": {
@@ -110,3 +112,152 @@ SUBMIT_REVIEW_TOOL: dict = {
         },
     },
 }
+
+
+# ======================================================================
+# Tool Call Validation
+# ======================================================================
+
+
+def _extract_schema(tool_def: dict) -> dict | None:
+    """Extract the JSON schema from a tool definition dict."""
+    try:
+        return tool_def["function"]["parameters"]
+    except (KeyError, TypeError):
+        return None
+
+
+def validate_tool_call(tool_call: dict, tool_def: dict) -> list[str]:
+    """Validate a tool call against its tool definition schema.
+
+    Args:
+        tool_call: The tool call dict with ``{"name": str, "arguments": dict}``.
+        tool_def: The tool definition dict (one of the module-level constants).
+
+    Returns:
+        A list of human-readable validation errors.  Empty list = valid.
+    """
+    errors: list[str] = []
+    name = tool_call.get("name", "?")
+    args = tool_call.get("arguments", {})
+
+    if not isinstance(args, dict):
+        errors.append(f"Tool '{name}': arguments must be an object, got {type(args).__name__}")
+        return errors
+
+    schema = _extract_schema(tool_def)
+    if schema is None:
+        return errors  # No schema to validate against
+
+    props = schema.get("properties", {})
+    required = schema.get("required", [])
+
+    # Check required fields
+    for field_name in required:
+        if field_name not in args or args[field_name] is None or args[field_name] == "":
+            errors.append(
+                f"Tool '{name}': missing required field '{field_name}'"
+            )
+
+    # Check field types and enum values
+    for field_name, field_value in args.items():
+        prop = props.get(field_name)
+        if prop is None:
+            continue
+
+        expected_type = prop.get("type", "")
+        enum_values = prop.get("enum", [])
+
+        if enum_values and field_value not in enum_values:
+            errors.append(
+                f"Tool '{name}': field '{field_name}' has invalid value "
+                f"'{field_value}'.  Allowed: {', '.join(enum_values)}"
+            )
+
+        if expected_type == "string" and not isinstance(field_value, str):
+            errors.append(
+                f"Tool '{name}': field '{field_name}' must be a string, "
+                f"got {type(field_value).__name__}"
+            )
+
+        if expected_type == "array":
+            if not isinstance(field_value, list):
+                errors.append(
+                    f"Tool '{name}': field '{field_name}' must be an array, "
+                    f"got {type(field_value).__name__}"
+                )
+            else:
+                item_schema = prop.get("items", {})
+                item_type = item_schema.get("type", "")
+                if item_type == "string":
+                    for i, item in enumerate(field_value):
+                        if not isinstance(item, str):
+                            errors.append(
+                                f"Tool '{name}': field '{field_name}'[{i}] must be a string, "
+                                f"got {type(item).__name__}"
+                            )
+
+    return errors
+
+
+def format_validation_errors(errors: list[str]) -> str:
+    """Format validation errors into a human-readable message for the LLM."""
+    if not errors:
+        return ""
+    lines = [
+        "Your tool call had the following validation errors. Please fix them and try again:",
+        "",
+    ]
+    for err in errors:
+        lines.append(f"- {err}")
+    lines.append("")
+    lines.append("Provide corrected tool call(s) only.")
+    return "\n".join(lines)
+
+
+def validate_and_log(
+    tool_calls: list[dict],
+    tool_defs: list[dict],
+    *,
+    agent_name: str = "",
+) -> tuple[list[dict], list[str]]:
+    """Validate a batch of tool calls against their definitions.
+
+    Args:
+        tool_calls: List of tool call dicts.
+        tool_defs: List of tool definition dicts.
+        agent_name: Agent name for logging.
+
+    Returns:
+        (valid_calls, all_errors) where valid_calls contains only calls
+        that passed validation, and all_errors is a flat list of error strings.
+    """
+    import structlog
+
+    logger = structlog.get_logger()
+    valid: list[dict] = []
+    all_errors: list[str] = []
+    name_to_def = {td["function"]["name"]: td for td in tool_defs}
+
+    for call in tool_calls:
+        call_name = call.get("name", "")
+        tool_def = name_to_def.get(call_name)
+        if tool_def is None:
+            err = f"Unknown tool '{call_name}'"
+            all_errors.append(err)
+            logger.warning("tool_call_unknown", agent=agent_name, tool=call_name)
+            continue
+
+        errors = validate_tool_call(call, tool_def)
+        if errors:
+            all_errors.extend(errors)
+            logger.warning(
+                "tool_call_invalid",
+                agent=agent_name,
+                tool=call_name,
+                errors=errors,
+            )
+        else:
+            valid.append(call)
+
+    return valid, all_errors
