@@ -9,5 +9,6 @@ tests/
 .data/
 docs/
 *.md
+!README.md
 !.dockerignore
 !.env.example
