@@ -8,6 +8,8 @@ All tests run fully offline — no Ollama server, no Redis required.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +50,6 @@ class MockOllamaClient:
     def __init__(self, default_response: str = "Mock LLM response.") -> None:
         self.default_response = default_response
         self.chat_calls: list[dict[str, Any]] = []
-        self.generate_calls: list[dict[str, Any]] = []
         self._health = True
 
         # Expose same attributes as real client
@@ -100,10 +101,6 @@ class MockOllamaClient:
         )
         return self.default_response, []
 
-    async def generate(self, prompt: str, **kwargs: Any) -> str:
-        self.generate_calls.append({"prompt": prompt, **kwargs})
-        return self.default_response
-
     async def health_check(self) -> bool:
         return self._health
 
@@ -114,7 +111,7 @@ class MockOllamaClient:
         pass
 
     def get_stats(self) -> dict[str, Any]:
-        return {"total_requests": len(self.chat_calls) + len(self.generate_calls)}
+        return {"total_requests": len(self.chat_calls)}
 
 
 @pytest.fixture
@@ -128,6 +125,34 @@ def mock_ollama() -> MockOllamaClient:
 # ============================================================
 
 
+class MockPubSub:
+    """Mock Redis pubsub object that never yields messages."""
+
+    def __init__(self) -> None:
+        self._closed = False
+
+    async def subscribe(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    async def unsubscribe(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    async def aclose(self) -> None:
+        self._closed = True
+
+    async def listen(self) -> AsyncIterator[dict]:  # type: ignore[return]
+        """Block forever (or until cancelled)."""
+        while True:
+            await asyncio.sleep(3600)
+
+
+class MockRedis:
+    """Minimal mock redis client with pubsub support."""
+
+    def pubsub(self, *args: Any, **kwargs: Any) -> MockPubSub:
+        return MockPubSub()
+
+
 class MockMessageBus:
     """A mock MessageBus that records publishes and returns nothing on consume."""
 
@@ -137,6 +162,7 @@ class MockMessageBus:
         self.dead_lettered: list[tuple[str, str, AgentMessage, str]] = []
         self.ui_events: list[tuple[str, dict]] = []
         self._connected = True
+        self.redis = MockRedis()
 
     async def connect(self) -> None:
         self._connected = True
