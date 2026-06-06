@@ -57,6 +57,15 @@ docker compose up
 
 Navigate to [http://localhost:8080](http://localhost:8080) and submit your first product idea!
 
+## 📚 Documentation
+
+| Guide | Description |
+|---|---|
+| [Architecture](docs/ARCHITECTURE.md) | System architecture, data flow, state machine, schema, security |
+| [User Guide](docs/USER_GUIDE.md) | Step-by-step setup and usage guide |
+| [Contributing](CONTRIBUTING.md) | Development setup, tests, code style, adding agents |
+| [Prompt Cookbook](docs/PROMPT_COOKBOOK.md) | Prompt engineering reference and best practices |
+
 ## 🏗️ Architecture
 
 ```
@@ -89,7 +98,9 @@ Navigate to [http://localhost:8080](http://localhost:8080) and submit your first
 HCA-Orchestration/
 ├── config/                 # Configuration files (YAML/JSON)
 ├── docs/                   # Documentation
-│   └── ARCHITECTURE.md     # System architecture
+│   ├── ARCHITECTURE.md     # Full system architecture
+│   ├── USER_GUIDE.md       # End-user guide
+│   └── PROMPT_COOKBOOK.md  # Prompt engineering reference
 ├── src/
 │   └── hca/                # Main package (hca namespace)
 │       ├── main.py         # Application entrypoint
