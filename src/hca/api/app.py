@@ -6,7 +6,7 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from fastapi import FastAPI, Request, Response
@@ -229,7 +229,7 @@ def create_app(
         )
 
     @app.get("/api/health/db", tags=["system"], response_model=None)
-    async def db_health():
+    async def db_health() -> Any:  # noqa: ANN401
         """Detailed database statistics (size, counts, schema version)."""
         try:
             return await db.get_stats()
