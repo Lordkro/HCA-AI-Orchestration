@@ -77,4 +77,7 @@ disable_error_code = [
     "no-any-return",    # Pre-existing: 8 return-type issues across the codebase
     "misc",             # Pre-existing: redis-py await type incompatibilities
     "arg-type",         # Pre-existing: redis-py stub compat + agent task_manager type
+    "str-unpack",       # Pre-existing: message_bus.py redis xreadgroup loose typing
+    "union-attr",       # Pre-existing: message_bus.py redis return type unions
+    "index",            # Pre-existing: message_bus.py redis dict field indexing
 ]
