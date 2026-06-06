@@ -10,7 +10,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from hca.api.app import create_app
-from hca.core.models import AgentRole, Task, TaskState
+from hca.core.models import AgentRole, AgentStatus, Task, TaskState
 from tests.conftest import MockMessageBus, MockOllamaClient, make_message
 
 # ============================================================
@@ -25,6 +25,14 @@ class FakeAgent:
         self.role = role
         self.ollama = MockOllamaClient()
         self._busy = False
+        self.status = AgentStatus.IDLE
+        self._current_activity = ""
+
+        class _FakeStats:
+            @staticmethod
+            def snapshot() -> dict:
+                return {"uptime_seconds": 0.0}
+        self.stats = _FakeStats()
 
     def get_info(self) -> dict:
         return {
@@ -89,8 +97,35 @@ class TestHealth:
         assert r.status_code == 200
         body = r.json()
         assert body["status"] == "ok"
-        assert "bus" in body
+        assert "db" in body
+        assert "redis" in body
         assert "ollama" in body
+        assert "agents" in body
+
+    @pytest.mark.asyncio
+    async def test_liveness(self, client):
+        ac, _ = client
+        r = await ac.get("/api/health/live")
+        assert r.status_code == 200
+        assert r.json()["status"] == "alive"
+
+    @pytest.mark.asyncio
+    async def test_readiness(self, client):
+        ac, _ = client
+        r = await ac.get("/api/health/ready")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ready"
+        assert body["issues"] == []
+
+    @pytest.mark.asyncio
+    async def test_db_health(self, client):
+        ac, _ = client
+        r = await ac.get("/api/health/db")
+        assert r.status_code == 200
+        body = r.json()
+        assert "schema_version" in body
+        assert "total_projects" in body
 
 
 # ============================================================

@@ -149,6 +149,9 @@ class MockPubSub:
 class MockRedis:
     """Minimal mock redis client with pubsub support."""
 
+    async def ping(self) -> bool:
+        return True
+
     def pubsub(self, *args: Any, **kwargs: Any) -> MockPubSub:
         return MockPubSub()
 

@@ -284,6 +284,11 @@ class Database:
             raise DatabaseError("Database not initialized. Call initialize() first.")
         return self._db
 
+    @property
+    def is_connected(self) -> bool:
+        """Whether the database connection is initialized."""
+        return self._db is not None
+
     # --------------------------------------------------------
     # Execute helpers with BusyError retry
     # --------------------------------------------------------
