@@ -89,8 +89,7 @@ Navigate to [http://localhost:8080](http://localhost:8080) and submit your first
 HCA-Orchestration/
 ├── config/                 # Configuration files (YAML/JSON)
 ├── docs/                   # Documentation
-│   ├── ARCHITECTURE.md     # System architecture
-│   └── README.md
+│   └── ARCHITECTURE.md     # System architecture
 ├── src/
 │   └── hca/                # Main package (hca namespace)
 │       ├── main.py         # Application entrypoint

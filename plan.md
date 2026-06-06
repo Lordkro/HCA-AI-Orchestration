@@ -521,34 +521,33 @@ All agent-to-agent communication follows this format:
 | OS        | Linux (Bazzite)                  |
 
 **GPU Note:** AMD GPUs use ROCm for acceleration, which is fully supported on Linux.
-Ollama will run in a Docker container with ROCm passthrough for GPU acceleration.
-The 32B model (~20-22GB) exceeds the 16GB VRAM, so Ollama will use **partial GPU
-offload** — ~75% of layers on GPU, remainder in system RAM. This yields excellent
-performance (~15-25 tok/s) with the highest quality model that fits this hardware.
+Ollama runs in a Docker container with ROCm passthrough for GPU acceleration.
+The default 14B models (~9GB each) fit comfortably within 16GB VRAM, with room for
+a second model via Ollama's swapping (`OLLAMA_MAX_LOADED_MODELS=1`).
 
 ## Model Strategy
 
-**Single-model approach:** All agents use the same base model, differentiated only
-by system prompts. This avoids costly model-swap overhead. With ROCm GPU acceleration
-and partial offload, the 32B model runs at excellent speeds on this hardware.
+**Two-model approach:** Most agents share the same base model (`qwen3:14b`), with the
+Coder agent using a code-specialized variant (`qwen2.5-coder:14b`). All are differentiated
+by system prompts. With 16GB VRAM, Ollama swaps models as needed.
 
 | Tier       | Model                | VRAM+RAM     | Speed (est.)     | When to Use                             |
 |------------|----------------------|--------------|------------------|-----------------------------------------|
-| Default    | `qwen3.5:27b`       | ~17 GB       | ~20-35 tok/s     | Best quality, multimodal, thinking mode |
-| Coder      | `qwen3-coder:30b`   | ~19 GB       | ~25-40 tok/s     | MoE (3.3B active), agentic coding RL    |
-| Fallback   | `qwen3.5:9b`        | ~7 GB        | ~40-60 tok/s     | If 27B is too slow for iteration        |
+| Default    | `qwen3:14b`          | ~9 GB        | ~30-45 tok/s     | General purpose, all agents except coder |
+| Coder      | `qwen2.5-coder:14b` | ~9 GB        | ~30-45 tok/s     | Specialized for code generation          |
+| Fallback   | `qwen3:8b`           | ~5 GB        | ~50-70 tok/s     | Lightweight for constrained hardware     |
 
 ## Configuration Defaults
 
 | Setting                  | Default Value              |
 |--------------------------|----------------------------|
 | Ollama base URL          | `http://ollama:11434`      |
-| Default model            | `qwen3.5:27b`              |
-| PM model                 | `qwen3.5:27b`              |
-| Research model           | `qwen3.5:27b`              |
-| Spec model               | `qwen3.5:27b`              |
-| Coder model              | `qwen3-coder:30b`          |
-| Critic model             | `qwen3.5:27b`              |
+| Default model            | `qwen3:14b`                |
+| PM model                 | `qwen3:14b`                |
+| Research model           | `qwen3:14b`                |
+| Spec model               | `qwen3:14b`                |
+| Coder model              | `qwen2.5-coder:14b`        |
+| Critic model             | `qwen3:14b`                |
 | Redis URL                | `redis://redis:6379`       |
 | Max iterations per task  | `5`                        |
 | Max tasks per project    | `50`                       |
@@ -567,8 +566,8 @@ Phase 1  ███████████████████████�
 Phase 2  ████████████████████████████████  Agents         ✅
 Phase 3  ████████████████████████████████  Orchestration  ✅
 Phase 4  ████████████████████████████████  UI             ✅
-Phase 5  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  Docker
-Phase 6  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  Polish
+Phase 5  ████████████████████████████████  Docker
+Phase 6  ████████████████████████████████  Polish
 ```
 
 ---
