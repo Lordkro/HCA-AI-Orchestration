@@ -25,3 +25,6 @@ env/
 dist/
 build/
 *.egg-info/
+
+# uv lockfile (optional — deps managed via pyproject.toml)
+uv.lock
