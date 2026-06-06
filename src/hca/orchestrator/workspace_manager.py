@@ -8,6 +8,7 @@ Handles:
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -65,8 +66,8 @@ class WorkspaceManager:
         size_freed_mb = 0.0
         for ws_dir in to_remove:
             try:
-                size_before = _get_dir_size(ws_dir)
-                shutil.rmtree(ws_dir)
+                size_before = await asyncio.to_thread(_get_dir_size, ws_dir)
+                await asyncio.to_thread(shutil.rmtree, ws_dir)
                 size_freed_mb += size_before / (1024 * 1024)
                 logger.info(
                     "workspace_removed",
@@ -115,7 +116,7 @@ class WorkspaceManager:
             datetime.fromtimestamp(ws.stat().st_mtime, tz=UTC)
             for ws in workspaces
         ]
-        sizes = [_get_dir_size(ws) for ws in workspaces]
+        sizes = [await asyncio.to_thread(_get_dir_size, ws) for ws in workspaces]
 
         oldest_age = (now - min(mtimes)).days
         newest_age = (now - max(mtimes)).days
