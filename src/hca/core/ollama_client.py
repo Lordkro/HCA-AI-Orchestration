@@ -482,6 +482,7 @@ class OllamaClient:
         *,
         model: str | None = None,
         temperature: float = 0.7,
+        top_p: float = 0.9,
         max_tokens: int = 4096,
         auto_trim: bool = True,
     ) -> str:
@@ -491,6 +492,7 @@ class OllamaClient:
             messages: List of chat messages (role + content).
             model: Model to use (defaults to self.default_model).
             temperature: Sampling temperature.
+            top_p: Nucleus sampling parameter.
             max_tokens: Max tokens to generate.
             auto_trim: If True, automatically trim messages to fit context window.
         """
@@ -516,6 +518,7 @@ class OllamaClient:
             "think": False,
             "options": {
                 "temperature": temperature,
+                "top_p": top_p,
                 "num_predict": max_tokens,
                 "num_ctx": self.num_ctx,
                 "num_gpu": 20,
@@ -576,6 +579,7 @@ class OllamaClient:
         *,
         model: str | None = None,
         temperature: float = 0.7,
+        top_p: float = 0.9,
         max_tokens: int = 4096,
         auto_trim: bool = True,
     ) -> tuple[str, list[dict]]:
@@ -590,6 +594,7 @@ class OllamaClient:
             tools: Tool definitions in Ollama/OpenAI function-calling format.
             model: Model override.
             temperature: Sampling temperature.
+            top_p: Nucleus sampling parameter.
             max_tokens: Max tokens to generate.
             auto_trim: If True, trim messages to fit context window.
         """
@@ -606,6 +611,7 @@ class OllamaClient:
             "tools": tools,
             "options": {
                 "temperature": temperature,
+                "top_p": top_p,
                 "num_predict": max_tokens,
                 "num_ctx": self.num_ctx,
             },

@@ -34,3 +34,29 @@ Structure your reports with clear sections:
 4. Potential Challenges & Mitigations
 5. Best Practices
 6. Final Recommendations
+
+FEW-SHOT EXAMPLE:
+Task: "Research auth approaches for a Python REST API todo app"
+Your report:
+"## Technology Analysis
+- **Recommended: JWT with access + refresh tokens** — most widely supported for REST APIs
+- FastAPI's built-in OAuth2 support via python-jose and passlib
+- Libraries: python-jose[cryptography] 3.3+, passlib[bcrypt] 1.7+
+- Alternatives considered: session-based auth (requires stateful storage)
+
+## Architecture Recommendations
+- Access token: 15 min expiry, refresh token: 7 day expiry
+- Store refresh tokens as HTTP-only cookies
+- Password hashing with bcrypt (12 rounds)
+
+## Data Model Considerations
+- users table: id, email (unique), hashed_password, created_at
+- refresh_tokens table: id, user_id (FK), token_hash, expires_at
+
+## Best Practices
+- Rate-limit login endpoint (5 attempts/min per IP)
+- Use Pydantic models for request/response validation
+- Log all auth failures for monitoring
+
+## Final Recommendations
+Implement JWT Bearer auth with FastAPI's `HTTPBearer` dependency. Use bcrypt for passwords. Store refresh tokens in DB with expiry."

@@ -36,3 +36,78 @@ OUTPUT FORMAT:
 5. File Structure (complete tree)
 6. Implementation Notes
 7. Testing Strategy
+
+FEW-SHOT EXAMPLE:
+Given research recommending JWT auth for a todo API:
+"## 1. Overview
+REST API for a todo application with JWT-based user authentication. Users can create, read, update, and delete todo items.
+
+## 2. Architecture
+```
+┌─────────────┐     ┌──────────────┐     ┌──────────┐
+│ FastAPI App  │────▶│ Auth Middle   │────▶│  Routes  │
+│  main.py     │     │  ware         │     │ /auth/*  │
+└─────────────┘     └──────────────┘     │ /todos/* │
+                                         └──────────┘
+                                               │
+                                        ┌──────┴──────┐
+                                        │  SQLite DB   │
+                                        └─────────────┘
+```
+
+## 3. Data Models
+```python
+class User(Base):
+    id: int (PK, auto-increment)
+    email: str (unique, indexed, max 255)
+    hashed_password: str (bcrypt, 60 chars)
+    created_at: datetime (UTC, default now)
+
+class Todo(Base):
+    id: int (PK, auto-increment)
+    user_id: int (FK -> users.id, indexed)
+    title: str (max 200, required)
+    completed: bool (default False)
+    created_at: datetime (UTC, default now)
+    updated_at: datetime (UTC, on-update now)
+```
+
+## 4. API Specification
+### POST /api/auth/register
+Request: `{"email": str, "password": str}`
+Response 201: `{"id": int, "email": str}`
+Errors: 409 (email exists), 422 (validation)
+
+### POST /api/auth/login
+Request: `{"email": str, "password": str}`
+Response 200: `{"access_token": str, "token_type": "bearer"}`
+Errors: 401 (invalid credentials)
+
+### GET /api/todos
+Headers: Authorization: Bearer <token>
+Response 200: `[{"id": int, "title": str, "completed": bool}]`
+
+## 5. File Structure
+```
+app/
+  main.py          — FastAPI app creation, CORS, lifespan
+  database.py      — SQLAlchemy engine, session dependency
+  models.py        — SQLAlchemy ORM models
+  schemas.py       — Pydantic request/response schemas
+  auth.py          — JWT creation, verification, password hashing
+  routers/
+    auth.py        — /api/auth/* endpoints
+    todos.py       — /api/todos/* endpoints
+  middleware.py    — Rate limiting, logging
+requirements.txt
+```
+
+## 6. Implementation Notes
+- Use SQLAlchemy 2.0 async with aiosqlite
+- Migrations handled by create_all on startup (simple case)
+- Error response format: `{"detail": str}`
+
+## 7. Testing Strategy
+- Unit tests for auth helpers (token creation, password hashing)
+- Integration tests for each endpoint using TestClient
+- Fixture: test DB with pre-seeded user"

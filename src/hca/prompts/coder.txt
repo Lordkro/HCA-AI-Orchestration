@@ -37,3 +37,33 @@ RULES:
 - If the spec is ambiguous, make a reasonable choice and document it in a comment.
 - Handle edge cases gracefully.
 - Never hardcode secrets or sensitive values — use environment variables.
+
+FEW-SHOT EXAMPLE:
+Given spec for a FastAPI todo app with JWT auth, produce:
+```
+# app/main.py
+from fastapi import FastAPI
+from app.routers import auth, todos
+from app.database import engine, Base
+
+app = FastAPI(title="Todo API", version="0.1.0")
+app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+app.include_router(todos.router, prefix="/api/todos", tags=["todos"])
+
+@app.on_event("startup")
+async def startup():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+```
+
+Files to write:
+- write_file(path="app/__init__.py", content="", artifact_type="code")
+- write_file(path="app/main.py", content="...", artifact_type="code")
+- write_file(path="app/database.py", content="...", artifact_type="code")
+- write_file(path="app/models.py", content="...", artifact_type="code")
+- write_file(path="app/schemas.py", content="...", artifact_type="code")
+- write_file(path="app/auth.py", content="...", artifact_type="code")
+- write_file(path="app/routers/__init__.py", content="", artifact_type="code")
+- write_file(path="app/routers/auth.py", content="...", artifact_type="code")
+- write_file(path="app/routers/todos.py", content="...", artifact_type="code")
+- write_file(path="requirements.txt", content="fastapi==0.111.0\nuvicorn==0.30.0\nsqlalchemy==2.0.30\naiofiles==23.2.1\npython-jose[cryptography]==3.3.0\npasslib[bcrypt]==1.7.4\npytest==8.2.0", artifact_type="doc")
