@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import structlog
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -143,11 +144,52 @@ def create_app(
 
     @app.get("/api/health", tags=["system"])
     async def health_check() -> dict:
-        """System health and statistics."""
+        """System health and statistics — aggregates DB, Redis, Ollama, and agents."""
+        log = structlog.get_logger()
+
+        db_stats = {}
+        db_healthy = False
+        try:
+            db_stats = await db.get_stats()
+            db_healthy = db.is_connected
+        except Exception as exc:
+            db_stats = {"error": "unavailable"}
+            log.warning("health_db_unavailable", error=str(exc))
+
+        redis_healthy = False
+        try:
+            await bus.redis.ping()
+            redis_healthy = True
+        except Exception as exc:
+            log.warning("health_redis_unavailable", error=str(exc))
+
+        ollama_healthy = False
+        ollama_stats = {}
+        if agents:
+            try:
+                ollama_healthy = await agents[0].ollama.health_check()
+                ollama_stats = agents[0].ollama.get_stats()
+            except Exception as exc:
+                ollama_stats = {"error": "unavailable"}
+                log.warning("health_ollama_unavailable", error=str(exc))
+
+        agent_statuses = {
+            a.role.value: {
+                "status": a.status.value,
+                "current_activity": a._current_activity,
+                "uptime_seconds": a.stats.snapshot()["uptime_seconds"],
+            }
+            for a in agents
+        } if agents else {}
+
+        overall = "ok" if (db_healthy and redis_healthy and ollama_healthy) else "degraded"
+
         return {
-            "status": "ok",
-            "bus": bus.get_stats(),
-            "ollama": agents[0].ollama.get_stats() if agents else {},
+            "status": overall,
+            "db": {"connected": db_healthy, **db_stats},
+            "redis": {"connected": redis_healthy, "stats": bus.get_stats()},
+            "ollama": {"healthy": ollama_healthy, **ollama_stats},
+            "agents": agent_statuses,
         }
 
     @app.get("/api/health/live", tags=["system"])
@@ -160,9 +202,24 @@ def create_app(
         """Readiness probe — returns 200 only when all subsystems are healthy."""
         issues = []
 
+        # Check Ollama
         ollama = agents[0].ollama if agents else None
-        if ollama and not await ollama.health_check():
-            issues.append("ollama_unreachable")
+        if ollama:
+            try:
+                if not await ollama.health_check():
+                    issues.append("ollama_unreachable")
+            except Exception:
+                issues.append("ollama_unreachable")
+
+        # Check Redis
+        try:
+            await bus.redis.ping()
+        except Exception:
+            issues.append("redis_unreachable")
+
+        # Check DB
+        if not db.is_connected:
+            issues.append("database_unavailable")
 
         ready = len(issues) == 0
 
@@ -170,6 +227,17 @@ def create_app(
             content={"status": "ready" if ready else "not_ready", "issues": issues},
             status_code=200 if ready else 503,
         )
+
+    @app.get("/api/health/db", tags=["system"], response_model=None)
+    async def db_health():
+        """Detailed database statistics (size, counts, schema version)."""
+        try:
+            return await db.get_stats()
+        except Exception as e:
+            return JSONResponse(
+                content={"error": str(e)},
+                status_code=503,
+            )
 
     # Serve static frontend files
     static_dir = Path(__file__).parent / "static"
