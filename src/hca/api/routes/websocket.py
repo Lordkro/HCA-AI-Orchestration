@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 
+import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+logger = structlog.get_logger()
 router = APIRouter()
 
 
@@ -70,9 +71,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                             data = data.decode("utf-8")
                         await websocket.send_text(data)
             except asyncio.CancelledError:
-                pass
+                return
             except Exception:
-                pass
+                logger.warning("redis_pubsub_listener_error", exc_info=True)
 
         redis_task = asyncio.create_task(listen_redis())
 
@@ -100,7 +101,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 await pubsub.unsubscribe("hca:notifications")
                 await pubsub.aclose()
             except Exception:
-                logging.getLogger(__name__).debug(
+                logger.debug(
                     "Failed to close websocket pubsub cleanly",
                     exc_info=True,
                 )

@@ -22,9 +22,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
+
 from hca.core.config import settings
 from hca.core.database import Database
 from hca.core.message_bus import MessageBus
+from hca.core.metrics import (
+    agent_status as agent_status_metric,
+)
+from hca.core.metrics import (
+    agent_uptime_seconds,
+    record_agent_dead_lettered,
+    record_agent_llm_call,
+    record_agent_llm_duration,
+    record_agent_llm_error,
+    record_agent_message_failed,
+    record_agent_message_received,
+    record_agent_message_sent,
+)
 from hca.core.models import (
     AgentMessage,
     AgentRole,
@@ -35,7 +49,7 @@ from hca.core.models import (
     Priority,
     TaskState,
 )
-from hca.core.ollama_client import OllamaClient
+from hca.core.ollama_client import OllamaCircuitBreakerOpenError, OllamaClient
 
 if TYPE_CHECKING:
     from hca.orchestrator.task_manager import TaskManager
@@ -105,6 +119,8 @@ class BaseAgent(ABC):
     MAX_HISTORY_PER_PROJECT: int = 40
     # Retry processing once before dead-lettering
     MAX_PROCESSING_RETRIES: int = 1
+    # Retry backoff: base delay in seconds (doubles each retry)
+    RETRY_BASE_DELAY: float = 2.0
     # Stale message reclaim threshold (ms)
     STALE_CLAIM_MS: int = 120_000
 
@@ -182,6 +198,7 @@ class BaseAgent(ABC):
         self._running = True
         self.status = AgentStatus.IDLE
         self.stats.started_at = time.monotonic()
+        agent_status_metric.labels(agent=self.role.value).set(0)
         logger.info("agent_started", agent=self.role.value, model=self._model)
 
         await self._emit_heartbeat(force=True)
@@ -216,6 +233,7 @@ class BaseAgent(ABC):
             except Exception as e:
                 logger.error("agent_loop_error", agent=self.role.value, error=str(e))
                 self.status = AgentStatus.ERROR
+                agent_status_metric.labels(agent=self.role.value).set(2)
                 await asyncio.sleep(5)
 
         self.status = AgentStatus.STOPPED
@@ -254,6 +272,8 @@ class BaseAgent(ABC):
                 "stats": self.stats.snapshot(),
             },
         )
+        uptime = time.monotonic() - self.stats.started_at
+        agent_uptime_seconds.labels(agent=self.role.value).set(uptime)
 
     # --------------------------------------------------------
     # Reliable Message Processing
@@ -264,6 +284,7 @@ class BaseAgent(ABC):
     ) -> None:
         """Process a message with retry, ack, and dead-letter support."""
         self.stats.messages_received += 1
+        record_agent_message_received(self.role.value)
         self.stats.projects_touched.add(message.project_id)
 
         last_error: Exception | None = None
@@ -276,6 +297,7 @@ class BaseAgent(ABC):
             except Exception as e:
                 last_error = e
                 self.stats.messages_failed += 1
+                record_agent_message_failed(self.role.value)
                 logger.warning(
                     "message_processing_failed",
                     agent=self.role.value,
@@ -284,10 +306,29 @@ class BaseAgent(ABC):
                     error=str(e),
                 )
                 if attempt < self.MAX_PROCESSING_RETRIES:
-                    await asyncio.sleep(2)  # Brief pause before retry
+                    delay = self.RETRY_BASE_DELAY * (2**attempt)
+                    logger.warning(
+                        "msg_retry_backoff",
+                        agent=self.role.value,
+                        msg_id=message.id,
+                        attempt=attempt + 1,
+                        delay_seconds=delay,
+                    )
+                    await asyncio.sleep(delay)
 
-        # All retries exhausted — dead-letter
+        # All retries exhausted
+        # If the circuit breaker is open, don't dead-letter — leave unacked
+        # so the stale claim mechanism retries when Ollama recovers.
+        if isinstance(last_error, OllamaCircuitBreakerOpenError):
+            logger.warning(
+                "message_deferred_circuit_breaker_open",
+                agent=self.role.value,
+                msg_id=message.id,
+            )
+            return
+
         self.stats.messages_dead_lettered += 1
+        record_agent_dead_lettered(self.role.value)
         reason = (
             f"Agent {self.role.value} failed after "
             f"{1 + self.MAX_PROCESSING_RETRIES} attempts: {last_error}"
@@ -343,6 +384,7 @@ class BaseAgent(ABC):
                 await self.bus.publish(response)
                 await self.db.save_message(response.model_dump(mode="json"))
                 self.stats.messages_sent += 1
+                record_agent_message_sent(self.role.value)
 
         except Exception as e:
             logger.error(
@@ -455,19 +497,26 @@ class BaseAgent(ABC):
             )
         except TimeoutError:
             self.stats.llm_errors += 1
+            record_agent_llm_error(self.role.value)
             logger.error("agent_think_timeout", agent=self.role.value, timeout=300)
             self.status = AgentStatus.ERROR
+            agent_status_metric.labels(agent=self.role.value).set(2)
             raise
         except Exception as e:
             self.stats.llm_errors += 1
+            record_agent_llm_error(self.role.value)
             logger.error("agent_think_error", agent=self.role.value, error=str(e))
             self.status = AgentStatus.ERROR
+            agent_status_metric.labels(agent=self.role.value).set(2)
             raise
 
         self.status = AgentStatus.IDLE
+        agent_status_metric.labels(agent=self.role.value).set(0)
         elapsed = time.monotonic() - t0
         self.stats.llm_calls += 1
         self.stats.total_think_seconds += elapsed
+        record_agent_llm_call(self.role.value)
+        record_agent_llm_duration(self.role.value, elapsed)
 
         # Record in per-project history
         await self._append_history(pid, "user", prompt)
@@ -530,18 +579,24 @@ class BaseAgent(ABC):
             )
         except TimeoutError:
             self.stats.llm_errors += 1
+            record_agent_llm_error(self.role.value)
             logger.error("agent_think_timeout", agent=self.role.value, timeout=300)
             self.status = AgentStatus.ERROR
+            agent_status_metric.labels(agent=self.role.value).set(2)
             raise
         except Exception as e:
             self.stats.llm_errors += 1
+            record_agent_llm_error(self.role.value)
             logger.error("agent_think_error", agent=self.role.value, error=str(e))
             self.status = AgentStatus.ERROR
+            agent_status_metric.labels(agent=self.role.value).set(2)
             raise
 
         elapsed = time.monotonic() - t0
         self.stats.llm_calls += 1
         self.stats.total_think_seconds += elapsed
+        record_agent_llm_call(self.role.value)
+        record_agent_llm_duration(self.role.value, elapsed)
 
         await self._append_history(pid, "user", prompt)
         if text_response:

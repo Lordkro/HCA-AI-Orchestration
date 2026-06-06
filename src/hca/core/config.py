@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     ollama_num_ctx: int = 8192
     ollama_max_retries: int = 3
     ollama_retry_base_delay: float = 2.0
+    ollama_max_concurrent: int = 1  # Max parallel LLM calls
+    ollama_circuit_breaker_failure_threshold: int = 5  # Failures before circuit opens
+    ollama_circuit_breaker_recovery_timeout: int = 60  # Seconds before retry after open
 
     # Per-agent model overrides (empty string = use default)
     ollama_pm_model: str = ""
@@ -27,6 +30,10 @@ class Settings(BaseSettings):
 
     # --- Database ---
     database_url: str = "sqlite:///data/hca.db"
+
+    # --- API Security ---
+    hca_api_key: str = ""
+    cors_origins: str = "*"
 
     # --- Web UI ---
     web_host: str = "0.0.0.0"  # noqa: S104 - Docker service must bind externally.

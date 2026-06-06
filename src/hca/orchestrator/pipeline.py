@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 
 import structlog
+
 from hca.core.message_bus import MessageBus
 from hca.core.models import TaskState
 from hca.orchestrator.guardrails import Guardrails

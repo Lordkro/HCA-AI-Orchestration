@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 import structlog
+
 from hca.core.config import settings
 from hca.core.models import Task, TaskState
 

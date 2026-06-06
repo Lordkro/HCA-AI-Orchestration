@@ -7,19 +7,24 @@ Provides async database access with:
 - Pagination support for large result sets
 - Search across projects and artifacts
 - Database statistics and diagnostics
+- Automatic retry with exponential backoff for SQLITE_BUSY errors
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
+import sqlite3
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import aiosqlite
-
 import structlog
+
+from hca.core.metrics import db_connected
 from hca.core.models import Artifact, Project, Task, TaskState
 
 logger = structlog.get_logger()
@@ -162,6 +167,63 @@ class DatabaseError(Exception):
     """Base exception for database errors."""
 
 
+class DatabaseBusyError(DatabaseError):
+    """Raised when the database is locked after all retries are exhausted."""
+
+
+# How many times to retry on SQLITE_BUSY before giving up.
+DB_BUSY_MAX_RETRIES = 5
+# Base delay (seconds) — doubles each retry.
+DB_BUSY_BASE_DELAY = 0.1
+
+
+T = TypeVar("T")
+
+
+def _is_busy_error(e: Exception) -> bool:
+    """Check if an exception is a SQLITE_BUSY error.
+
+    SQLITE_BUSY maps to ``sqlite3.OperationalError`` with "database is locked"
+    in the message.  ``sqlite3.BusyError`` (Python 3.12+) is also checked for
+    forward compatibility.
+    """
+    if isinstance(e, sqlite3.OperationalError) and "database is locked" in str(e):
+        return True
+    # Python 3.12+ has sqlite3.BusyError; check via name for safety.
+    busy_type = getattr(sqlite3, "BusyError", None)
+    if busy_type and isinstance(e, busy_type):
+        return True
+    return False
+
+
+async def _retry_on_busy(fn: Callable[[], Awaitable[T]]) -> T:
+    """Execute an async callable, retrying on SQLITE_BUSY.
+
+    Uses exponential backoff: 0.1s, 0.2s, 0.4s, 0.8s, 1.6s.
+    """
+    last_err: Exception | None = None
+    for attempt in range(DB_BUSY_MAX_RETRIES):
+        try:
+            return await fn()
+        except Exception as e:
+            if _is_busy_error(e):
+                last_err = e
+                if attempt < DB_BUSY_MAX_RETRIES - 1:
+                    delay = DB_BUSY_BASE_DELAY * (2**attempt)
+                    logger.warning(
+                        "database_busy_retry",
+                        attempt=attempt + 1,
+                        max_retries=DB_BUSY_MAX_RETRIES,
+                        delay_seconds=delay,
+                    )
+                    await asyncio.sleep(delay)
+            else:
+                raise  # Non-busy errors propagate immediately
+    raise DatabaseBusyError(
+        f"Database locked after {DB_BUSY_MAX_RETRIES} retries: {last_err}"
+    ) from last_err
+
+
 # ============================================================
 # Database
 # ============================================================
@@ -201,6 +263,7 @@ class Database:
         await self._db.execute("PRAGMA busy_timeout=5000")
 
         await self._run_migrations()
+        db_connected.set(1)
         logger.info("database_initialized", path=self.db_path, version=CURRENT_SCHEMA_VERSION)
 
     async def close(self) -> None:
@@ -211,6 +274,7 @@ class Database:
                 await self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             await self._db.close()
             self._db = None
+            db_connected.set(0)
             logger.info("database_closed")
 
     @property
@@ -219,6 +283,30 @@ class Database:
         if self._db is None:
             raise DatabaseError("Database not initialized. Call initialize() first.")
         return self._db
+
+    # --------------------------------------------------------
+    # Execute helpers with BusyError retry
+    # --------------------------------------------------------
+
+    async def _execute(self, sql: str, params: tuple | list = ()) -> aiosqlite.Cursor:
+        """Execute an SQL statement with automatic BusyError retry."""
+        async def _exec() -> aiosqlite.Cursor:
+            return await self.db.execute(sql, params)
+        return await _retry_on_busy(_exec)
+
+    async def _executescript(self, sql: str) -> None:
+        """Execute a SQL script with automatic BusyError retry."""
+        async def _exec() -> None:
+            await self.db.executescript(sql)
+        await _retry_on_busy(_exec)
+
+    async def _execute_insert(
+        self, sql: str, params: tuple | list = ()
+    ) -> aiosqlite.Cursor:
+        """Execute an INSERT with automatic BusyError retry."""
+        async def _exec() -> aiosqlite.Cursor:
+            return await self.db.execute(sql, params)
+        return await _retry_on_busy(_exec)
 
     # --------------------------------------------------------
     # Migration System
@@ -248,8 +336,8 @@ class Database:
                 raise DatabaseError(f"Missing migration for version {version}")
 
             logger.info("applying_migration", version=version)
-            await self.db.executescript(sql)
-            await self.db.execute(
+            await self._executescript(sql)
+            await self._execute(
                 "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                 (version, datetime.now(UTC).isoformat()),
             )
@@ -263,7 +351,7 @@ class Database:
     async def create_project(self, project: Project) -> Project:
         """Insert a new project."""
         try:
-            await self.db.execute(
+            await self._execute_insert(
                 """INSERT INTO projects (id, name, description, created_at, updated_at, status, idea, tokens_used)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
@@ -334,7 +422,7 @@ class Database:
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [project_id]
 
-        await self.db.execute(
+        await self._execute(
             f"UPDATE projects SET {set_clause} WHERE id = ?",  # noqa: S608 — field names from static allowlist
             values,
         )
@@ -347,7 +435,7 @@ class Database:
 
     async def delete_project(self, project_id: str) -> bool:
         """Delete a project and all associated data (cascades)."""
-        cursor = await self.db.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        cursor = await self._execute("DELETE FROM projects WHERE id = ?", (project_id,))
         await self.db.commit()
         deleted = cursor.rowcount > 0
         if deleted:
@@ -373,7 +461,7 @@ class Database:
     async def create_task(self, task: Task) -> Task:
         """Insert a new task."""
         try:
-            await self.db.execute(
+            await self._execute_insert(
                 """INSERT INTO tasks
                    (id, project_id, title, description, state, assigned_to,
                     created_at, updated_at, iteration, max_iterations,
@@ -452,7 +540,7 @@ class Database:
 
     async def update_task(self, task: Task) -> None:
         """Update a task's full state."""
-        await self.db.execute(
+        await self._execute(
             """UPDATE tasks SET
                state = ?, assigned_to = ?, updated_at = ?,
                iteration = ?, deliverable = ?, feedback = ?,
@@ -478,7 +566,7 @@ class Database:
 
     async def update_task_state(self, task_id: str, state: TaskState) -> None:
         """Update only the task state (lightweight update)."""
-        await self.db.execute(
+        await self._execute(
             "UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?",
             (state.value, datetime.now(UTC).isoformat(), task_id),
         )
@@ -498,7 +586,7 @@ class Database:
 
     async def add_project_tokens(self, project_id: str, tokens: int) -> int:
         """Atomically add to a project's token usage and return the new total."""
-        await self.db.execute(
+        await self._execute(
             "UPDATE projects SET tokens_used = tokens_used + ? WHERE id = ?",
             (tokens, project_id),
         )
@@ -524,7 +612,7 @@ class Database:
     async def create_artifact(self, artifact: Artifact) -> Artifact:
         """Insert a new artifact."""
         try:
-            await self.db.execute(
+            await self._execute_insert(
                 """INSERT INTO artifacts
                    (id, project_id, task_id, agent, filename, content,
                     artifact_type, created_at, version)
@@ -632,7 +720,7 @@ class Database:
 
         msg_id = msg.get("id", "unknown")
         try:
-            await self.db.execute(
+            await self._execute_insert(
                 """INSERT OR IGNORE INTO messages
                    (id, timestamp, sender, recipient, type,
                     project_id, task_id, payload, priority)
@@ -714,7 +802,7 @@ class Database:
     ) -> None:
         """Record a project event for the timeline."""
         try:
-            await self.db.execute(
+            await self._execute_insert(
                 """INSERT INTO project_events
                    (project_id, event_type, agent, description, metadata, created_at)
                    VALUES (?, ?, ?, ?, ?, ?)""",

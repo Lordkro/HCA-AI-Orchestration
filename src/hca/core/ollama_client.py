@@ -18,8 +18,15 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 import httpx
-
 import structlog
+
+from hca.core.metrics import (
+    ollama_circuit_breaker_state,
+    ollama_circuit_breaker_tripped_total,
+    ollama_concurrent_requests,
+    ollama_up,
+    record_ollama_request,
+)
 
 logger = structlog.get_logger()
 
@@ -111,6 +118,10 @@ class OllamaContextOverflowError(OllamaError):
     """Raised when the input exceeds the context window."""
 
 
+class OllamaCircuitBreakerOpenError(OllamaError):
+    """Raised when the circuit breaker is open (Ollama deemed unavailable)."""
+
+
 class OllamaClient:
     """Async client for the Ollama REST API.
 
@@ -130,6 +141,9 @@ class OllamaClient:
         num_ctx: int = 8192,
         max_retries: int = 3,
         retry_base_delay: float = 2.0,
+        max_concurrent: int = 1,
+        circuit_breaker_failure_threshold: int = 5,
+        circuit_breaker_recovery_timeout: float = 60.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.default_model = default_model
@@ -137,12 +151,78 @@ class OllamaClient:
         self.num_ctx = num_ctx
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
+        self.max_concurrent = max_concurrent
+        self.circuit_breaker_failure_threshold = circuit_breaker_failure_threshold
+        self.circuit_breaker_recovery_timeout = circuit_breaker_recovery_timeout
         self.stats = ClientStats()
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=httpx.Timeout(timeout, connect=15.0),
         )
         self._available_models: list[str] = []
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._active_requests = 0
+        self._cb_state = 0  # 0=closed, 1=half-open, 2=open
+        self._cb_failure_count = 0
+        self._cb_last_failure_time = 0.0
+        self._cb_tripped_count = 0
+
+    async def _acquire_concurrency_slot(self) -> None:
+        """Acquire a concurrency slot, blocking if at capacity."""
+        await self._semaphore.acquire()
+        self._active_requests += 1
+        ollama_concurrent_requests.set(self._active_requests)
+
+    def _release_concurrency_slot(self) -> None:
+        """Release a concurrency slot."""
+        self._active_requests -= 1
+        ollama_concurrent_requests.set(self._active_requests)
+        self._semaphore.release()
+
+    # --------------------------------------------------------
+    # Circuit Breaker
+    # --------------------------------------------------------
+
+    def _cb_check(self) -> None:
+        """Check circuit breaker state; raises if open and not yet recoverable."""
+        now = time.monotonic()
+        if self._cb_state == 2:  # Open
+            if now - self._cb_last_failure_time >= self.circuit_breaker_recovery_timeout:
+                self._cb_state = 1  # Half-open — allow probe
+                ollama_circuit_breaker_state.set(1)
+                logger.info("circuit_breaker_half_open")
+            else:
+                raise OllamaCircuitBreakerOpenError(
+                    f"Circuit breaker open for "
+                    f"{now - self._cb_last_failure_time:.0f}s "
+                    f"(recovery in {self.circuit_breaker_recovery_timeout}s)"
+                )
+
+    def _cb_record_failure(self) -> None:
+        """Record a failure and potentially open the circuit."""
+        self._cb_failure_count += 1
+        self._cb_last_failure_time = time.monotonic()
+        if self._cb_failure_count >= self.circuit_breaker_failure_threshold:
+            self._cb_state = 2  # Open
+            self._cb_tripped_count += 1
+            ollama_circuit_breaker_state.set(2)
+            ollama_circuit_breaker_tripped_total.inc()
+            ollama_up.set(0)
+            logger.error(
+                "circuit_breaker_opened",
+                failure_count=self._cb_failure_count,
+                recovery_timeout_s=self.circuit_breaker_recovery_timeout,
+            )
+
+    def _cb_record_success(self) -> None:
+        """Record a success; closes the circuit if it was open."""
+        if self._cb_state != 0:
+            self._cb_state = 0
+            self._cb_failure_count = 0
+            ollama_circuit_breaker_state.set(0)
+            ollama_up.set(1)
+            logger.info("circuit_breaker_closed")
+        self._cb_failure_count = 0
 
     # --------------------------------------------------------
     # Retry Logic
@@ -207,6 +287,9 @@ class OllamaClient:
 
         # All retries exhausted
         self.stats.total_failures += 1
+        self._cb_record_failure()
+        model = (json_data or {}).get("model", "unknown")
+        record_ollama_request(model, "error", 0, 0, 0)
         raise last_error or OllamaError("Request failed after all retries")
 
     # --------------------------------------------------------
@@ -314,6 +397,7 @@ class OllamaClient:
         """
         last_error: Exception | None = None
         keys = content_key.split(".")
+        model = payload.get("model", "unknown")
 
         for attempt in range(self.max_retries + 1):
             try:
@@ -386,6 +470,8 @@ class OllamaClient:
                 await asyncio.sleep(delay)
 
         self.stats.total_failures += 1
+        self._cb_record_failure()
+        record_ollama_request(model, "error", 0, 0, 0)
         raise last_error or OllamaError("Stream request failed after all retries")
 
     # --------------------------------------------------------
@@ -407,6 +493,7 @@ class OllamaClient:
         like qwen3, while still returning the complete text.
         """
         model = model or self.default_model
+        self._cb_check()
         payload: dict = {
             "model": model,
             "prompt": prompt,
@@ -433,10 +520,14 @@ class OllamaClient:
             estimated_tokens=prompt_tokens,
         )
 
-        start = time.monotonic()
-        text, final_data = await self._stream_collect(
-            "/api/generate", payload, content_key="response"
-        )
+        await self._acquire_concurrency_slot()
+        try:
+            start = time.monotonic()
+            text, final_data = await self._stream_collect(
+                "/api/generate", payload, content_key="response"
+            )
+        finally:
+            self._release_concurrency_slot()
         elapsed = time.monotonic() - start
 
         # Strip qwen3 <think>...</think> blocks from output
@@ -455,6 +546,7 @@ class OllamaClient:
             tokens_per_second=eval_count / elapsed if elapsed > 0 else 0,
         )
         self.stats.record(stats)
+        record_ollama_request(model, "ok", elapsed, prompt_eval_count, eval_count)
 
         logger.info(
             "ollama_generate_complete",
@@ -465,6 +557,7 @@ class OllamaClient:
             duration_s=round(elapsed, 2),
             tok_per_s=round(stats.tokens_per_second, 1),
         )
+        self._cb_record_success()
         return text
 
     async def chat(
@@ -486,6 +579,7 @@ class OllamaClient:
             auto_trim: If True, automatically trim messages to fit context window.
         """
         model = model or self.default_model
+        self._cb_check()
 
         # Context window management
         if auto_trim:
@@ -520,10 +614,14 @@ class OllamaClient:
             estimated_input_tokens=input_tokens_est,
         )
 
-        start = time.monotonic()
-        text, final_data = await self._stream_collect(
-            "/api/chat", payload, content_key="message.content"
-        )
+        await self._acquire_concurrency_slot()
+        try:
+            start = time.monotonic()
+            text, final_data = await self._stream_collect(
+                "/api/chat", payload, content_key="message.content"
+            )
+        finally:
+            self._release_concurrency_slot()
         elapsed = time.monotonic() - start
 
         # Strip qwen3 <think>...</think> blocks from output
@@ -541,6 +639,7 @@ class OllamaClient:
             tokens_per_second=eval_count / elapsed if elapsed > 0 else 0,
         )
         self.stats.record(stats)
+        record_ollama_request(model, "ok", elapsed, prompt_eval_count, eval_count)
 
         logger.info(
             "ollama_chat_complete",
@@ -551,6 +650,7 @@ class OllamaClient:
             duration_s=round(elapsed, 2),
             tok_per_s=round(stats.tokens_per_second, 1),
         )
+        self._cb_record_success()
         return text
 
     async def chat_stream(
@@ -567,6 +667,7 @@ class OllamaClient:
         Yields tokens as they are generated. Also tracks stats.
         """
         model = model or self.default_model
+        self._cb_check()
 
         if auto_trim:
             messages = self.trim_messages_to_fit(messages, max_completion=max_tokens)
@@ -584,71 +685,78 @@ class OllamaClient:
 
         logger.debug("ollama_chat_stream_start", model=model, message_count=len(messages))
 
-        start = time.monotonic()
-        token_count = 0
+        await self._acquire_concurrency_slot()
+        try:
+            start = time.monotonic()
+            token_count = 0
 
-        last_error: Exception | None = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                async with self._client.stream("POST", "/api/chat", json=payload) as response:
-                    if response.status_code == 404:
-                        raise OllamaModelError(
-                            f"Model '{model}' not found. Pull it first with: ollama pull {model}"
+            last_error: Exception | None = None
+            for attempt in range(self.max_retries + 1):
+                try:
+                    async with self._client.stream("POST", "/api/chat", json=payload) as response:
+                        if response.status_code == 404:
+                            raise OllamaModelError(
+                                f"Model '{model}' not found. Pull it first with: ollama pull {model}"
+                            )
+                        response.raise_for_status()
+                        async for line in response.aiter_lines():
+                            if line:
+                                try:
+                                    data = json.loads(line)
+                                except json.JSONDecodeError:
+                                    continue
+                                token = data.get("message", {}).get("content", "")
+                                if token:
+                                    token_count += 1
+                                    yield token
+                                if data.get("done", False):
+                                    elapsed = time.monotonic() - start
+                                    eval_count = data.get("eval_count", token_count)
+                                    stats = GenerationStats(
+                                        model=model,
+                                        prompt_tokens=data.get("prompt_eval_count", 0),
+                                        completion_tokens=eval_count,
+                                        total_tokens=data.get("prompt_eval_count", 0) + eval_count,
+                                        duration_seconds=elapsed,
+                                        tokens_per_second=eval_count / elapsed if elapsed > 0 else 0,
+                                    )
+                                    self.stats.record(stats)
+                                    record_ollama_request(
+                                        model, "ok", elapsed,
+                                        stats.prompt_tokens, stats.completion_tokens,
+                                    )
+                                    logger.info(
+                                        "ollama_chat_stream_complete",
+                                        model=model,
+                                        tokens=eval_count,
+                                        duration_s=round(elapsed, 2),
+                                        tok_per_s=round(stats.tokens_per_second, 1),
+                                    )
+                    self._cb_record_success()
+                    return  # Success — exit retry loop
+
+                except OllamaModelError:
+                    raise
+                except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                    last_error = e
+                    if attempt < self.max_retries:
+                        delay = self.retry_base_delay * (2**attempt)
+                        self.stats.total_retries += 1
+                        logger.warning(
+                            "ollama_stream_retry",
+                            attempt=attempt + 1,
+                            max_retries=self.max_retries,
+                            delay_seconds=delay,
+                            error=str(e),
                         )
-                    response.raise_for_status()
-                    async for line in response.aiter_lines():
-                        if line:
-                            try:
-                                data = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
-                            token = data.get("message", {}).get("content", "")
-                            if token:
-                                token_count += 1
-                                yield token
-                            # Check if this is the final message with stats
-                            if data.get("done", False):
-                                elapsed = time.monotonic() - start
-                                eval_count = data.get("eval_count", token_count)
-                                stats = GenerationStats(
-                                    model=model,
-                                    prompt_tokens=data.get("prompt_eval_count", 0),
-                                    completion_tokens=eval_count,
-                                    total_tokens=data.get("prompt_eval_count", 0) + eval_count,
-                                    duration_seconds=elapsed,
-                                    tokens_per_second=eval_count / elapsed if elapsed > 0 else 0,
-                                )
-                                self.stats.record(stats)
-                                logger.info(
-                                    "ollama_chat_stream_complete",
-                                    model=model,
-                                    tokens=eval_count,
-                                    duration_s=round(elapsed, 2),
-                                    tok_per_s=round(stats.tokens_per_second, 1),
-                                )
-                return  # Success — exit retry loop
+                        await asyncio.sleep(delay)
 
-            except OllamaModelError:
-                raise
-            except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
-                last_error = e
-                if attempt < self.max_retries:
-                    delay = self.retry_base_delay * (2**attempt)
-                    self.stats.total_retries += 1
-                    logger.warning(
-                        "ollama_stream_retry",
-                        attempt=attempt + 1,
-                        max_retries=self.max_retries,
-                        delay_seconds=delay,
-                        error=str(e),
-                    )
-                    await asyncio.sleep(delay)
-
-        self.stats.total_failures += 1
-        raise OllamaError(f"Streaming request failed after all retries: {last_error}")
-
-    # --------------------------------------------------------
-    # Tool Calling (function calling)
+            self.stats.total_failures += 1
+            record_ollama_request(model, "error", 0, 0, 0)
+            self._cb_record_failure()
+            raise OllamaError(f"Streaming request failed after all retries: {last_error}")
+        finally:
+            self._release_concurrency_slot()
     # --------------------------------------------------------
 
     async def chat_with_tools(
@@ -676,6 +784,7 @@ class OllamaClient:
             auto_trim: If True, trim messages to fit context window.
         """
         model = model or self.default_model
+        self._cb_check()
 
         if auto_trim:
             messages = self.trim_messages_to_fit(messages, max_completion=max_tokens)
@@ -701,8 +810,12 @@ class OllamaClient:
             estimated_input_tokens=input_tokens_est,
         )
 
-        start = time.monotonic()
-        response = await self._request_with_retry("POST", "/api/chat", json_data=payload)
+        await self._acquire_concurrency_slot()
+        try:
+            start = time.monotonic()
+            response = await self._request_with_retry("POST", "/api/chat", json_data=payload)
+        finally:
+            self._release_concurrency_slot()
         elapsed = time.monotonic() - start
         data = response.json()
 
@@ -738,6 +851,8 @@ class OllamaClient:
             tokens_per_second=eval_count / elapsed if elapsed > 0 else 0,
         )
         self.stats.record(stats)
+        record_ollama_request(model, "ok", elapsed, prompt_eval_count, eval_count)
+        self._cb_record_success()
 
         logger.info(
             "ollama_chat_with_tools_complete",
@@ -823,8 +938,11 @@ class OllamaClient:
         """Check if Ollama is reachable."""
         try:
             response = await self._client.get("/api/tags")
-            return response.status_code == 200
+            ok = response.status_code == 200
+            ollama_up.set(1 if ok else 0)
+            return ok
         except httpx.HTTPError:
+            ollama_up.set(0)
             return False
 
     def get_stats(self) -> dict:
@@ -845,5 +963,6 @@ class OllamaClient:
 
     async def close(self) -> None:
         """Close the HTTP client."""
+        ollama_up.set(0)
         await self._client.aclose()
         logger.info("ollama_client_closed", stats=self.get_stats())

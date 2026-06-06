@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import structlog
+
 from hca.core.database import Database
 from hca.core.message_bus import MessageBus
 from hca.core.models import (
