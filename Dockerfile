@@ -7,6 +7,10 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends curl && \
     rm -rf /var/lib/apt/lists/*
 
+# Create a non-root user and group
+RUN groupadd --system --gid 1001 hca && \
+    useradd --system --gid hca --uid 1001 --create-home --shell /sbin/nologin hca
+
 # Copy dependency definition first for layer caching
 COPY pyproject.toml README.md ./
 
@@ -17,8 +21,12 @@ RUN pip install --no-cache-dir .
 COPY src/ src/
 COPY scripts/ scripts/
 
-# Create data directories
-RUN mkdir -p .data/workspaces .data/logs .data/cache
+# Create data directories and set ownership
+RUN mkdir -p .data/workspaces .data/logs .data/cache && \
+    chown -R hca:hca .data
+
+# Switch to non-root user
+USER hca:hca
 
 # Expose the web UI port
 EXPOSE 8080

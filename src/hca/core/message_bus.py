@@ -20,8 +20,16 @@ from datetime import UTC, datetime
 from typing import Any
 
 import redis.asyncio as aioredis
-
 import structlog
+
+from hca.core.metrics import (
+    bus_connected,
+    record_bus_consume,
+    record_bus_dead_letter,
+    record_bus_error,
+    record_bus_publish,
+    record_bus_reconnect,
+)
 from hca.core.models import AgentMessage, AgentRole
 
 logger = structlog.get_logger()
@@ -113,12 +121,14 @@ class MessageBus:
         )
         await self._redis.ping()
         self._connected = True
+        bus_connected.set(1)
         logger.info("message_bus_connected", url=self.redis_url)
 
     async def disconnect(self) -> None:
         """Disconnect from Redis gracefully."""
         if self._redis:
             self._connected = False
+            bus_connected.set(0)
             await self._redis.aclose()
             self._redis = None
             logger.info("message_bus_disconnected")
@@ -144,6 +154,7 @@ class MessageBus:
                     pass
                 logger.warning("message_bus_reconnecting")
                 self.stats.reconnections += 1
+                record_bus_reconnect()
                 await self.connect()
 
     async def ensure_consumer_group(self, stream: str, group: str = CONSUMER_GROUP) -> None:
@@ -222,6 +233,7 @@ class MessageBus:
 
             msg_type = message.type.value if hasattr(message.type, "value") else str(message.type)
             self.stats.record_publish(msg_type)
+            record_bus_publish(msg_type)
 
             logger.debug(
                 "message_published",
@@ -236,6 +248,7 @@ class MessageBus:
 
         except (aioredis.ConnectionError, aioredis.TimeoutError) as e:
             self.stats.publish_errors += 1
+            record_bus_error("publish")
             logger.error("message_publish_failed", error=str(e), msg_id=message.id)
             raise MessageBusError(f"Failed to publish message: {e}") from e
 
@@ -336,6 +349,7 @@ class MessageBus:
         try:
             await self.redis.xack(stream, CONSUMER_GROUP, entry_id)
             self.stats.messages_acknowledged += 1
+            record_bus_consume()
         except (aioredis.ConnectionError, aioredis.TimeoutError) as e:
             logger.error("acknowledge_failed", stream=stream, entry_id=entry_id, error=str(e))
 
@@ -405,6 +419,7 @@ class MessageBus:
         await self.redis.xadd(DEAD_LETTER_STREAM, dead_letter_data, maxlen=1000)
         await self.acknowledge(original_stream, entry_id)
         self.stats.messages_dead_lettered += 1
+        record_bus_dead_letter(reason)
         logger.warning(
             "message_dead_lettered",
             msg_id=message.id,

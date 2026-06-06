@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 
 import structlog
+
 from hca.agents.base_agent import BaseAgent
 from hca.core.database import Database
 from hca.core.message_bus import MessageBus

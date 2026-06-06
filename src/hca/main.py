@@ -10,9 +10,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+import structlog
 import uvicorn
 
-import structlog
 from hca.agents.coder_agent import CoderAgent
 from hca.agents.critic_agent import CriticAgent
 from hca.agents.pm_agent import PMAgent
@@ -89,6 +89,7 @@ async def main() -> None:
         num_ctx=settings.ollama_num_ctx,
         max_retries=settings.ollama_max_retries,
         retry_base_delay=settings.ollama_retry_base_delay,
+        max_concurrent=settings.ollama_max_concurrent,
     )
 
     # Validate Ollama connection (model loads lazily on first request)

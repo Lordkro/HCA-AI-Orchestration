@@ -58,6 +58,7 @@ class MockOllamaClient:
         self.num_ctx = 8192
         self.max_retries = 1
         self.retry_base_delay = 0.01
+        self.max_concurrent = 1
 
     async def chat(
         self,
