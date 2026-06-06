@@ -24,7 +24,7 @@ from hca.core.models import (
     TaskState,
 )
 from hca.core.ollama_client import OllamaClient
-from hca.core.tools import CREATE_TASK_TOOL
+from hca.core.tools import CREATE_TASK_TOOL, format_validation_errors, validate_and_log
 
 logger = structlog.get_logger()
 
@@ -97,19 +97,43 @@ Important rules:
 Think step by step about what needs to be built and in what order."""
 
         self._set_activity("Decomposing project idea into tasks")
+        tool_defs = [CREATE_TASK_TOOL]
         response, tool_calls = await self.think_with_tools(
-            prompt, [CREATE_TASK_TOOL], project_id=project_id
+            prompt, tool_defs, project_id=project_id
         )
+
+        # Validate tool calls and retry if needed
+        valid_calls, errors = validate_and_log(
+            tool_calls, tool_defs, agent_name=self.role.value
+        )
+        if errors and self.task_manager:
+            logger.warning(
+                "pm_invalid_tool_calls",
+                project_id=project_id,
+                error_count=len(errors),
+            )
+            fix_prompt = f"""{format_validation_errors(errors)}
+
+Original task:
+{idea}
+
+Please call create_task again with corrected arguments."""
+            response, tool_calls = await self.think_with_tools(
+                fix_prompt, tool_defs, project_id=project_id
+            )
+            valid_calls, errors = validate_and_log(
+                tool_calls, tool_defs, agent_name=self.role.value
+            )
 
         self._set_activity("Parsing tasks from LLM response")
         created_tasks: list[Task] = []
 
-        if tool_calls and self.task_manager:
-            # Tool calling path: create tasks from tool call arguments
+        if valid_calls and self.task_manager:
+            # Tool calling path: create tasks from validated tool call arguments
             title_to_id: dict[str, str] = {}
             call_args: list[tuple[dict, str]] = []
 
-            for call in tool_calls:
+            for call in valid_calls:
                 if call["name"] != "create_task":
                     continue
                 args = call["arguments"]
@@ -117,10 +141,6 @@ Think step by step about what needs to be built and in what order."""
                 description = args.get("description", "").strip()
                 agent_str = args.get("assigned_to", "").strip()
                 priority = args.get("priority", "normal")
-
-                if not title or not description or not agent_str:
-                    logger.warning("pm_skipping_incomplete_task", args=args)
-                    continue
 
                 try:
                     agent = AgentRole(agent_str)
