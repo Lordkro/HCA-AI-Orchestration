@@ -62,7 +62,7 @@ class WorkspaceManager:
                 to_remove.append(ws_dir)
 
         # Execute cleanup
-        size_freed_mb = 0
+        size_freed_mb = 0.0
         for ws_dir in to_remove:
             try:
                 size_before = _get_dir_size(ws_dir)

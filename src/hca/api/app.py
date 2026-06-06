@@ -154,7 +154,7 @@ def create_app(
         return {"status": "alive"}
 
     @app.get("/api/health/ready", tags=["system"])
-    async def readiness() -> dict:
+    async def readiness() -> JSONResponse:
         """Readiness probe — returns 200 only when all subsystems are healthy."""
         issues = []
 
@@ -163,7 +163,6 @@ def create_app(
             issues.append("ollama_unreachable")
 
         ready = len(issues) == 0
-        from fastapi.responses import JSONResponse
 
         return JSONResponse(
             content={"status": "ready" if ready else "not_ready", "issues": issues},

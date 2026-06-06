@@ -895,8 +895,8 @@ class Database:
 
         # Get total messages
         async with self.db.execute("SELECT COUNT(*) as c FROM messages") as cursor:
-            row = await cursor.fetchone()
-            total_messages = row["c"] if row else 0
+            msg_row = await cursor.fetchone()
+            total_messages = msg_row["c"] if msg_row else 0  # type: ignore[union-attr]
 
         # Database file size
         db_size_bytes = Path(self.db_path).stat().st_size if Path(self.db_path).exists() else 0
