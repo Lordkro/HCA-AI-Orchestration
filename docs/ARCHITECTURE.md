@@ -4,12 +4,13 @@
 
 HCA (Hybrid Cognitive Architecture) is an autonomous AI development team. It takes product ideas and drives them through a structured pipeline — research, specification, coding, and review — with zero human intervention. Every agent is powered by a local LLM served via Ollama.
 
-The system is built on five core abstractions:
+The system is built on six core abstractions:
 
 - **Agents** — LLM-driven workers, each with a distinct role
 - **Message Bus** — Redis Streams for reliable inter-agent communication
 - **Database** — SQLite for persistent project, task, and artifact storage
 - **Orchestrator** — Pipeline loop with guardrails, timeouts, and health checks
+- **Sandbox** — Isolated Docker containers for validating generated code
 - **API Layer** — FastAPI for REST endpoints, WebSocket for real-time UI updates
 
 ---
@@ -512,6 +513,74 @@ Remove workspaces older than `workspace_retention_days` or beyond the `workspace
 
 ---
 
+## Tool Call Validation
+
+Every tool call from an agent is validated against the JSON schema in its tool definition before execution. This ensures malformed or incomplete calls are caught early and corrected.
+
+### Validation Flow
+
+1. **Schema check** — `validate_tool_call(tool_call, tool_def)` in `src/hca/core/tools.py` checks:
+   - Required fields are present and non-empty
+   - Field types match (string, array, object)
+   - Enum values are valid
+   - Array item types are correct
+2. **Retry on failure** — If validation fails, the agent retries the LLM with a formatted error message listing exactly which fields need fixing
+3. **Fallback** — If the LLM still produces invalid calls after retry, the agent falls back to regex parsing (PM/Coder) or string matching (Critic)
+
+### Supported Tools
+
+| Tool | Used By | Purpose |
+|---|---|---|
+| `create_task` | PM | Decompose project ideas into tasks |
+| `write_file` | Coder | Write generated files to workspace |
+| `submit_review` | Critic | Submit structured review verdicts |
+
+---
+
+## Git Integration
+
+Each project workspace is a self-contained git repository, initialized automatically when the Coder agent first writes files.
+
+### Behavior
+
+- **First write** — `WorkspaceManager.init_project_repo()` runs `git init` with local user config
+- **After each coding iteration** — `WorkspaceManager.commit_workspace()` stages all changes and commits with a descriptive message
+- **Revision context** — Before a feedback revision, the Coder includes `git diff` output in the LLM prompt so the model can see exactly what changed since the last iteration
+- **Idempotent** — Safe to call multiple times; skips if `.git` already exists or no changes to commit
+
+### Benefits
+
+- Full revision history per project
+- Rollback capability
+- Diffs provide precise context for revision prompts
+
+---
+
+## Sandboxed Code Execution
+
+Generated code is validated inside isolated Docker containers. The `SandboxExecutor` in `src/hca/orchestrator/sandbox.py` runs syntax, import, and smoke tests without network access.
+
+### Validation Steps
+
+1. **Language detection** — Scans the workspace for `.py`, `.js`, or `.ts` files to determine the project language
+2. **Syntax check** — Runs `python -m py_compile` on all Python files
+3. **Import check** — Attempts to import entrypoint modules (`main.py`, `app.py`, etc.)
+4. **Smoke test** — Runs the entrypoint briefly (`timeout 5`) to check for startup errors
+
+### Container Isolation
+
+- **Image**: `python:3.11-slim` (extensible to node etc.)
+- **Network**: `--network none` — no network access
+- **Filesystem**: `--read-only` — read-only mount
+- **Timeout**: 60 seconds max per validation
+- **Cleanup**: `--rm` — container removed automatically
+
+### Graceful Degradation
+
+If Docker is unavailable on the host, all sandbox checks return a pass with `error: "docker_unavailable"`. The system continues to function normally without sandbox validation.
+
+---
+
 ## Metrics & Monitoring
 
 Prometheus metrics (all prefixed with `hca_`) are exposed at `/metrics`.
@@ -556,12 +625,13 @@ HCA-Orchestration/
 │   │   ├── ollama_client.py    # LLM API wrapper
 │   │   ├── metrics.py          # Prometheus metrics
 │   │   ├── logger.py           # Structured logging
-│   │   └── tools.py            # Tool definitions for agents
+│   │   └── tools.py            # Tool definitions + validation
 │   ├── orchestrator/
 │   │   ├── pipeline.py         # Health check loop
 │   │   ├── task_manager.py     # State machine & task CRUD
 │   │   ├── guardrails.py       # Limits & validation
-│   │   └── workspace_manager.py# File storage cleanup
+│   │   ├── workspace_manager.py# File storage, cleanup, git
+│   │   └── sandbox.py          # Docker-based code validation
 │   └── prompts/
 │       ├── pm.txt
 │       ├── research.txt

@@ -109,6 +109,30 @@ When the project is completed:
 - Read the **messages** to see the full conversation between agents
 - Download the workspace containing all generated files
 
+### Git History
+
+Each project workspace is a git repository. After every coding iteration and revision, changes are automatically committed:
+- View the commit log: `cd .data/workspaces/{project_id} && git log --oneline`
+- See what changed in the last iteration: `git diff HEAD~1`
+- Roll back to a previous state: `git checkout {commit_hash}`
+
+---
+
+## Sandbox Validation
+
+When the Coder agent finishes writing code, the **SandboxExecutor** automatically validates it inside an isolated Docker container:
+
+1. **Syntax check** — all generated files are compiled to check for syntax errors
+2. **Import check** — entrypoint modules (main.py, app.py, etc.) are imported
+3. **Smoke test** — the entrypoint is run briefly to detect startup errors
+
+The container runs with:
+- No network access (`--network none`)
+- Read-only filesystem (`--read-only`)
+- 60-second timeout
+
+If Docker is unavailable, sandbox validation is skipped and the system continues normally.
+
 ---
 
 ## Configuration

@@ -218,7 +218,28 @@ Three tools are defined in OpenAI function-calling format in `src/hca/core/tools
 
 ---
 
-## Few-Shot Examples
+## Tool Call Validation
+
+Every tool call is automatically validated against its JSON schema. If a call has missing required fields, wrong types, or invalid enum values, the agent retries the LLM with a descriptive error message.
+
+### Validation Rules
+
+| Rule | Example Error |
+|---|---|
+| Required fields must be present | `missing required field 'title'` |
+| Enum values must be valid | `field 'assigned_to' has invalid value 'dev'. Allowed: research, spec, coder` |
+| Field types must match | `field 'depends_on_titles' must be an array, got string` |
+| Array items must be correct type | `field 'depends_on_titles'[0] must be a string, got number` |
+
+### Retry Flow
+
+1. Agent calls `think_with_tools()` with tool definitions
+2. LLM returns tool calls
+3. `validate_and_log()` checks all calls against their schemas
+4. If invalid → LLM receives formatted errors and is asked to retry
+5. If still invalid after retry → agent falls back to regex/string parsing
+
+This means the LLM is given a chance to self-correct before the system resorts to fallback parsing.
 
 ### When to use few-shot vs plain instructions
 
