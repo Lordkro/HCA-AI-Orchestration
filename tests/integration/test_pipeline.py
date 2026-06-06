@@ -331,3 +331,85 @@ class TestTaskCountGuardrail:
 
         with pytest.raises(ValueError, match="maximum task limit"):
             await tm.create_task(project_id=p.id, title="T3", description="")
+
+
+# ============================================================
+# Pipeline — Project Resume After Restart
+# ============================================================
+
+
+class TestProjectResume:
+    """Tests that resume_projects resets stuck tasks on restart."""
+
+    async def test_resume_no_active_projects(self, db: Database, mock_bus: MockMessageBus) -> None:
+        tm = TaskManager(db=db, bus=mock_bus)
+        from hca.orchestrator.pipeline import Pipeline
+
+        pipeline = Pipeline(task_manager=tm, bus=mock_bus)
+        await pipeline.resume_projects()
+        # No error — nothing to resume
+
+    async def test_resume_resets_in_progress_tasks(self, db: Database, mock_bus: MockMessageBus) -> None:
+        p = Project(name="Resume", description="test", idea="x")
+        await db.create_project(p)
+
+        t1 = Task(
+            project_id=p.id,
+            title="Should reset",
+            description="",
+            state=TaskState.IN_PROGRESS,
+            assigned_to=AgentRole.CODER,
+        )
+        t2 = Task(
+            project_id=p.id,
+            title="Should reset too",
+            description="",
+            state=TaskState.ASSIGNED,
+            assigned_to=AgentRole.RESEARCH,
+        )
+        t3 = Task(
+            project_id=p.id,
+            title="Leave alone",
+            description="",
+            state=TaskState.PENDING,
+        )
+        await db.create_task(t1)
+        await db.create_task(t2)
+        await db.create_task(t3)
+
+        tm = TaskManager(db=db, bus=mock_bus)
+        from hca.orchestrator.pipeline import Pipeline
+
+        pipeline = Pipeline(task_manager=tm, bus=mock_bus)
+        await pipeline.resume_projects()
+
+        updated_t1 = await db.get_task(t1.id)
+        updated_t2 = await db.get_task(t2.id)
+        updated_t3 = await db.get_task(t3.id)
+
+        assert updated_t1.state == TaskState.PENDING
+        assert updated_t1.assigned_to is None
+        assert updated_t2.state == TaskState.PENDING
+        assert updated_t2.assigned_to is None
+        assert updated_t3.state == TaskState.PENDING  # unchanged
+
+    async def test_resume_skips_completed_tasks(self, db: Database, mock_bus: MockMessageBus) -> None:
+        p = Project(name="SkipDone", description="test", idea="x")
+        await db.create_project(p)
+
+        t = Task(
+            project_id=p.id,
+            title="Done task",
+            description="",
+            state=TaskState.DONE,
+        )
+        await db.create_task(t)
+
+        tm = TaskManager(db=db, bus=mock_bus)
+        from hca.orchestrator.pipeline import Pipeline
+
+        pipeline = Pipeline(task_manager=tm, bus=mock_bus)
+        await pipeline.resume_projects()
+
+        updated = await db.get_task(t.id)
+        assert updated.state == TaskState.DONE  # not modified

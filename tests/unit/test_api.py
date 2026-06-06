@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 
 from hca.api.app import create_app
 from hca.core.models import AgentRole, Task, TaskState
-from tests.conftest import MockMessageBus, MockOllamaClient
+from tests.conftest import MockMessageBus, MockOllamaClient, make_message
 
 # ============================================================
 # Helpers
@@ -360,4 +360,53 @@ class TestTasks:
     async def test_retry_nonexistent_task(self, client):
         ac, _ = client
         r = await ac.post("/api/tasks/detail/no-such-id/retry")
+        assert r.status_code == 404
+
+
+# ============================================================
+# Dead-Letter API
+# ============================================================
+
+
+class TestDeadLetterAPI:
+    @pytest.mark.asyncio
+    async def test_list_dead_letter_empty(self, client):
+        ac, _ = client
+        r = await ac.get("/api/admin/dead-letter")
+        assert r.status_code == 200
+        assert r.json() == []
+
+    @pytest.mark.asyncio
+    async def test_list_dead_letter_with_entries(self, client):
+        ac, bus = client
+        msg = make_message()
+        await bus.move_to_dead_letter("stream:pm", "entry-1", msg, reason="test_failure")
+
+        r = await ac.get("/api/admin/dead-letter")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) == 1
+        assert data[0]["reason"] == "test_failure"
+        assert data[0]["data"]["id"] == msg.id
+
+    @pytest.mark.asyncio
+    async def test_replay_dead_letter(self, client):
+        ac, bus = client
+        msg = make_message(content="replay me")
+        await bus.move_to_dead_letter("stream:pm", "entry-1", msg, reason="test")
+
+        entries = await bus.list_dead_letter_messages()
+        assert len(entries) == 1
+        entry_id = entries[0]["id"]
+
+        r = await ac.post(f"/api/admin/dead-letter/{entry_id}/replay")
+        assert r.status_code == 200
+        result = r.json()
+        assert result["status"] == "replayed"
+        assert result["message_id"] == msg.id
+
+    @pytest.mark.asyncio
+    async def test_replay_dead_letter_not_found(self, client):
+        ac, _ = client
+        r = await ac.post("/api/admin/dead-letter/no-such-id/replay")
         assert r.status_code == 404

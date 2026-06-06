@@ -13,6 +13,7 @@ from pathlib import Path
 import structlog
 import uvicorn
 
+from hca.agents.base_agent import BaseAgent
 from hca.agents.coder_agent import CoderAgent
 from hca.agents.critic_agent import CriticAgent
 from hca.agents.pm_agent import PMAgent
@@ -23,7 +24,7 @@ from hca.core.config import settings
 from hca.core.database import Database
 from hca.core.logger import setup_logging
 from hca.core.message_bus import MessageBus
-from hca.core.models import AgentRole
+from hca.core.models import AgentRole, AgentStatus
 from hca.core.ollama_client import OllamaClient
 from hca.orchestrator.pipeline import Pipeline
 from hca.orchestrator.task_manager import TaskManager
@@ -114,11 +115,45 @@ async def main() -> None:
         CriticAgent(bus=bus, ollama=ollama, db=db, task_manager=task_manager),
     ]
 
+    # Resume any in-progress projects after restart
+    await pipeline.resume_projects()
+
     # Start the web API
     app = create_app(db=db, bus=bus, task_manager=task_manager, agents=agents)
 
-    # Start all agents
-    agent_tasks = [asyncio.create_task(agent.start()) for agent in agents]
+    # ============================================================
+    # Agent Crash Supervisor
+    # ============================================================
+
+    async def _run_agent_with_supervisor(agent: BaseAgent) -> None:
+        """Run an agent's start() and respawn it if it crashes unexpectedly."""
+        while True:
+            try:
+                await agent.start()
+                # Agent stopped cleanly (stop() was called) — don't restart
+                return
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.error(
+                    "agent_crashed",
+                    agent=agent.role.value,
+                    error=str(e),
+                    exc_info=True,
+                )
+                agent.status = AgentStatus.ERROR
+                # Wait before restarting to avoid tight crash loops
+                await asyncio.sleep(5)
+                logger.info("agent_restarting", agent=agent.role.value)
+                # Reset state for fresh start
+                agent._running = False
+                agent.status = AgentStatus.STOPPED
+
+    # Start all agents with supervisor
+    agent_tasks = [
+        asyncio.create_task(_run_agent_with_supervisor(agent))
+        for agent in agents
+    ]
     pipeline_task = asyncio.create_task(pipeline.start())
 
     config = uvicorn.Config(
