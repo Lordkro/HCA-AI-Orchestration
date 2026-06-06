@@ -8,6 +8,8 @@ import json
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from hca.core.message_bus import MessageBusError
+
 logger = structlog.get_logger()
 router = APIRouter()
 
@@ -58,22 +60,39 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     try:
         # Subscribe to Redis pub/sub for real-time notifications
-        pubsub = bus.redis.pubsub()
-        await pubsub.subscribe("hca:notifications")
+        try:
+            pubsub = bus.redis.pubsub()
+            await pubsub.subscribe("hca:notifications")
+        except (MessageBusError, Exception) as e:
+            logger.warning("websocket_pubsub_failed", error=str(e))
+            await websocket.send_json({"type": "error", "message": "Redis unavailable"})
+            return
 
         async def listen_redis() -> None:
             """Forward Redis pub/sub messages to the WebSocket client."""
-            try:
-                async for message in pubsub.listen():
-                    if message["type"] == "message":
-                        data = message["data"]
-                        if isinstance(data, bytes):
-                            data = data.decode("utf-8")
-                        await websocket.send_text(data)
-            except asyncio.CancelledError:
-                return
-            except Exception:
-                logger.warning("redis_pubsub_listener_error", exc_info=True)
+            retry_delay = 1.0
+            while True:
+                try:
+                    async for message in pubsub.listen():
+                        if message["type"] == "message":
+                            data = message["data"]
+                            if isinstance(data, bytes):
+                                data = data.decode("utf-8")
+                            await websocket.send_text(data)
+                        retry_delay = 1.0  # Reset on successful message
+                except asyncio.CancelledError:
+                    return
+                except Exception:
+                    logger.warning(
+                        "redis_pubsub_listener_error",
+                        retry_delay=retry_delay,
+                        exc_info=True,
+                    )
+                try:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 30.0)  # Exponential backoff, max 30s
+                except asyncio.CancelledError:
+                    return
 
         redis_task = asyncio.create_task(listen_redis())
 
