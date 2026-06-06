@@ -454,6 +454,35 @@ class MessageBus:
             return 0
 
     # --------------------------------------------------------
+    # Dead-Letter Queue Management
+    # --------------------------------------------------------
+
+    async def list_dead_letter_messages(self, count: int = 50) -> list[dict[str, Any]]:
+        """List the most recent dead-lettered messages."""
+        await self._ensure_connected()
+        entries = await self.redis.xrevrange(DEAD_LETTER_STREAM, count=count)
+        results: list[dict[str, Any]] = []
+        for entry_id, fields in entries:
+            try:
+                results.append({
+                    "id": entry_id,
+                    "original_stream": fields.get("original_stream", ""),
+                    "original_entry_id": fields.get("original_entry_id", ""),
+                    "reason": fields.get("reason", ""),
+                    "data": json.loads(fields.get("data", "{}")),
+                    "timestamp": fields.get("timestamp", ""),
+                })
+            except (json.JSONDecodeError, KeyError, ValueError):
+                continue
+        return results
+
+    async def delete_dead_letter(self, entry_id: str) -> bool:
+        """Remove a single entry from the dead-letter stream by its Redis entry ID."""
+        await self._ensure_connected()
+        deleted = await self.redis.xdel(DEAD_LETTER_STREAM, entry_id)
+        return bool(deleted)
+
+    # --------------------------------------------------------
     # UI / Event Methods
     # --------------------------------------------------------
 

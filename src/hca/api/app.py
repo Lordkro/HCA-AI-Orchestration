@@ -117,6 +117,7 @@ def create_app(
     # --------------------------------------------------------
 
     from hca.api.routes.agents import router as agents_router
+    from hca.api.routes.dead_letter import router as dead_letter_router
     from hca.api.routes.projects import router as projects_router
     from hca.api.routes.tasks import router as tasks_router
     from hca.api.routes.websocket import router as ws_router
@@ -124,6 +125,7 @@ def create_app(
     app.include_router(projects_router, prefix="/api/projects", tags=["projects"])
     app.include_router(agents_router, prefix="/api/agents", tags=["agents"])
     app.include_router(tasks_router, prefix="/api/tasks", tags=["tasks"])
+    app.include_router(dead_letter_router, prefix="/api/admin/dead-letter", tags=["admin"])
     app.include_router(ws_router, tags=["websocket"])
 
     # --------------------------------------------------------

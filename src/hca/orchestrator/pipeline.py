@@ -206,3 +206,47 @@ class Pipeline:
 
         except Exception as e:
             logger.error("pipeline_health_check_error", error=str(e))
+
+    async def resume_projects(self) -> None:
+        """On orchestrator restart, resume in-progress projects.
+
+        Scans active projects for tasks stuck in ASSIGNED or IN_PROGRESS
+        states and resets them to PENDING so the PM re-assigns and agents
+        re-process them.
+        """
+        try:
+            db = self.task_manager.db
+            projects = await db.list_projects(status="active")
+
+            for project in projects:
+                all_tasks = await db.list_tasks(project.id)
+                resume_states = {TaskState.ASSIGNED, TaskState.IN_PROGRESS}
+                stuck = [t for t in all_tasks if t.state in resume_states]
+
+                if not stuck:
+                    continue
+
+                logger.info(
+                    "project_resume_resetting_stuck_tasks",
+                    project_id=project.id,
+                    count=len(stuck),
+                )
+                for task in stuck:
+                    old_state = task.state.value
+                    task.state = TaskState.PENDING
+                    task.assigned_to = None
+                    await db.update_task(task)
+                    await self.bus.publish_ui_event(
+                        "task_state_changed",
+                        {
+                            "task_id": task.id,
+                            "project_id": project.id,
+                            "old_state": old_state,
+                            "new_state": TaskState.PENDING.value,
+                            "reason": "resume_after_restart",
+                        },
+                    )
+
+            logger.info("project_resume_complete")
+        except Exception as e:
+            logger.error("project_resume_error", error=str(e))

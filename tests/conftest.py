@@ -206,6 +206,24 @@ class MockMessageBus:
     ) -> None:
         self.dead_lettered.append((stream, entry_id, message, reason))
 
+    async def list_dead_letter_messages(self, count: int = 50) -> list[dict]:
+        """Return stored dead-letter entries as dicts (matches real bus format)."""
+        return [
+            {
+                "id": f"dl-{i}",
+                "original_stream": entry[0],
+                "original_entry_id": entry[1],
+                "reason": entry[3],
+                "data": entry[2].model_dump(mode="json"),
+                "timestamp": "2026-01-01T00:00:00Z",
+            }
+            for i, entry in enumerate(self.dead_lettered)
+        ][:count]
+
+    async def delete_dead_letter(self, entry_id: str) -> bool:
+        """Remove a dead-letter entry by ID (no-op in mock)."""
+        return True
+
     async def publish_ui_event(self, event_type: str, data: dict[str, Any]) -> None:
         self.ui_events.append((event_type, data))
 
