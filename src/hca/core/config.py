@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     # --- Ollama ---
     ollama_base_url: str = "http://ollama:11434"
     ollama_default_model: str = "qwen3:14b"
+    ollama_default_temperature: float = 0.7
+    ollama_default_top_p: float = 0.9
     ollama_coder_model: str = "qwen2.5-coder:14b"  # Default coder model (fallback)
     ollama_timeout: int = 120
     ollama_num_ctx: int = 8192
@@ -24,6 +26,20 @@ class Settings(BaseSettings):
     ollama_spec_model: str = ""
     ollama_coder_model_override: str = ""  # If set, overrides ollama_coder_model
     ollama_critic_model: str = ""
+
+    # Per-agent temperature overrides (0 = use default)
+    ollama_pm_temperature: float = 0.0
+    ollama_research_temperature: float = 0.0
+    ollama_spec_temperature: float = 0.0
+    ollama_coder_temperature: float = 0.0
+    ollama_critic_temperature: float = 0.0
+
+    # Per-agent top_p overrides (0 = use default)
+    ollama_pm_top_p: float = 0.0
+    ollama_research_top_p: float = 0.0
+    ollama_spec_top_p: float = 0.0
+    ollama_coder_top_p: float = 0.0
+    ollama_critic_top_p: float = 0.0
 
     # --- Redis ---
     redis_url: str = "redis://redis:6379/0"
@@ -68,6 +84,30 @@ class Settings(BaseSettings):
         }
         model = overrides.get(agent_name, "")
         return model if model else self.ollama_default_model
+
+    def get_agent_temperature(self, agent_name: str) -> float:
+        """Get the temperature for a specific agent, falling back to default."""
+        overrides = {
+            "pm": self.ollama_pm_temperature,
+            "research": self.ollama_research_temperature,
+            "spec": self.ollama_spec_temperature,
+            "coder": self.ollama_coder_temperature,
+            "critic": self.ollama_critic_temperature,
+        }
+        val = overrides.get(agent_name, 0.0)
+        return val if val != 0.0 else self.ollama_default_temperature
+
+    def get_agent_top_p(self, agent_name: str) -> float:
+        """Get the top_p for a specific agent, falling back to default."""
+        overrides = {
+            "pm": self.ollama_pm_top_p,
+            "research": self.ollama_research_top_p,
+            "spec": self.ollama_spec_top_p,
+            "coder": self.ollama_coder_top_p,
+            "critic": self.ollama_critic_top_p,
+        }
+        val = overrides.get(agent_name, 0.0)
+        return val if val != 0.0 else self.ollama_default_top_p
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

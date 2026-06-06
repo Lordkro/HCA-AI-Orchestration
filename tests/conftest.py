@@ -67,6 +67,7 @@ class MockOllamaClient:
         *,
         model: str | None = None,
         temperature: float = 0.7,
+        top_p: float = 0.9,
         max_tokens: int = 4096,
         auto_trim: bool = False,
     ) -> str:
@@ -75,6 +76,7 @@ class MockOllamaClient:
                 "messages": messages,
                 "model": model,
                 "temperature": temperature,
+                "top_p": top_p,
                 "max_tokens": max_tokens,
             }
         )
@@ -87,6 +89,7 @@ class MockOllamaClient:
         *,
         model: str | None = None,
         temperature: float = 0.7,
+        top_p: float = 0.9,
         max_tokens: int = 4096,
         auto_trim: bool = True,
     ) -> tuple[str, list[dict]]:
@@ -96,6 +99,7 @@ class MockOllamaClient:
                 "tools": tools,
                 "model": model,
                 "temperature": temperature,
+                "top_p": top_p,
                 "max_tokens": max_tokens,
             }
         )

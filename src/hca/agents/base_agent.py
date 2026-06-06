@@ -154,6 +154,8 @@ class BaseAgent(ABC):
 
         self._system_prompt: str = ""
         self._model: str = settings.get_agent_model(role.value)
+        self._temperature: float = settings.get_agent_temperature(role.value)
+        self._top_p: float = settings.get_agent_top_p(role.value)
         self._last_heartbeat: float = 0.0
 
         # Load system prompt from file
@@ -451,7 +453,8 @@ class BaseAgent(ABC):
         *,
         project_id: str = "",
         task_id: str = "",
-        temperature: float = 0.7,
+        temperature: float | None = None,
+        top_p: float | None = None,
         max_tokens: int = 4096,
     ) -> str:
         """Send a prompt to the LLM with system prompt and per-project history.
@@ -461,7 +464,8 @@ class BaseAgent(ABC):
             project_id: Isolates conversation history by project.  If empty,
                         uses a shared "_global" bucket (for non-project queries).
             task_id: Optional task ID for per-task token tracking.
-            temperature: Sampling temperature.
+            temperature: Sampling temperature (None = use per-agent default).
+            top_p: Nucleus sampling parameter (None = use per-agent default).
             max_tokens: Max tokens in the response.
 
         Returns:
@@ -489,7 +493,8 @@ class BaseAgent(ABC):
                 self.ollama.chat(
                     messages,
                     model=self._model,
-                    temperature=temperature,
+                    temperature=temperature if temperature is not None else self._temperature,
+                    top_p=top_p if top_p is not None else self._top_p,
                     max_tokens=max_tokens,
                     auto_trim=True,
                 ),
@@ -549,7 +554,8 @@ class BaseAgent(ABC):
         *,
         project_id: str = "",
         task_id: str = "",
-        temperature: float = 0.7,
+        temperature: float | None = None,
+        top_p: float | None = None,
         max_tokens: int = 4096,
     ) -> tuple[str, list[dict]]:
         """Send a prompt with tool definitions to the LLM."""
@@ -571,7 +577,8 @@ class BaseAgent(ABC):
                     messages,
                     tools,
                     model=self._model,
-                    temperature=temperature,
+                    temperature=temperature if temperature is not None else self._temperature,
+                    top_p=top_p if top_p is not None else self._top_p,
                     max_tokens=max_tokens,
                     auto_trim=True,
                 ),
