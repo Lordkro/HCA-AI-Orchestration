@@ -136,7 +136,7 @@ class OllamaClient:
     def __init__(
         self,
         base_url: str = "http://ollama:11434",
-        default_model: str = "qwen3.5:27b",
+        default_model: str = "qwen3:14b",
         timeout: int = 120,
         num_ctx: int = 8192,
         max_retries: int = 3,

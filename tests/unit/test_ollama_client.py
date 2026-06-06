@@ -200,7 +200,7 @@ class TestOllamaClientInit:
     def test_defaults(self) -> None:
         client = OllamaClient()
         assert client.base_url == "http://ollama:11434"
-        assert client.default_model == "qwen3.5:27b"
+        assert client.default_model == "qwen3:14b"
         assert client.num_ctx == 8192
         assert client.max_retries == 3
 
