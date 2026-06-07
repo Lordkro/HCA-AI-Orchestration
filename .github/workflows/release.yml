@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          cat <<EOF > /tmp/release.md
+          ## HCA Orchestration ${TAG}
+
+          See the [full changelog](https://github.com/${{ github.repository }}/compare/${PREV_TAG:+${PREV_TAG}...}${TAG}) for details.
+
+          ### What's new in this release
+
+          $(git log --oneline --no-decorate "${PREV_TAG:+${PREV_TAG}..}HEAD" 2>/dev/null | sed 's/^/- /' || echo "- Initial release")
+          EOF
+          echo "path=/tmp/release.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: ${{ steps.notes.outputs.path }}
+          generate_release_notes: true
+          make_latest: true

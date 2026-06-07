@@ -2,6 +2,11 @@
 
 **Hybrid Cognitive Architecture — An Autonomous AI Development Team**
 
+[![Version](https://img.shields.io/github/v/tag/Lordkro/HCA-AI-Orchestration?label=version&logo=github)](https://github.com/Lordkro/HCA-AI-Orchestration/releases)
+[![CI](https://github.com/Lordkro/HCA-AI-Orchestration/actions/workflows/ci.yml/badge.svg)](https://github.com/Lordkro/HCA-AI-Orchestration/actions/workflows/ci.yml)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/Lordkro/HCA-AI-Orchestration/pkgs/container/hca-orchestration)
+[![License](https://img.shields.io/github/license/Lordkro/HCA-AI-Orchestration)](LICENSE)
+
 An AI agent team that takes your product ideas and builds them into working applications, powered by local LLMs via Ollama.
 
 ## 🧠 The Team
