@@ -14,6 +14,7 @@ from hca.core.models import (
 )
 from hca.core.ollama_client import OllamaClient
 from hca.core.tools import SUBMIT_REVIEW_TOOL, format_validation_errors, validate_and_log
+from hca.orchestrator.sandbox import SandboxExecutor, SandboxResult
 
 logger = structlog.get_logger()
 
@@ -56,12 +57,30 @@ class CriticAgent(BaseAgent):
         original_artifact_type = message.payload.metadata.get("artifact_type", "unknown")
         self._set_activity(f"Reviewing {original_artifact_type} from {message.sender.value}")
 
+        # Run sandbox validation for code artifacts
+        sandbox_context = ""
+        sb: SandboxResult | None = None
+        if original_artifact_type == "code":
+            sandbox = SandboxExecutor()
+            sb = await sandbox.validate_project(message.project_id)
+            if sb.error not in ("docker_unavailable", "docker_not_found", ""):
+                sandbox_context = f"""
+SANDBOX VALIDATION RESULTS:
+  Passed: {sb.passed}
+  Syntax check: {sb.syntax_check[:300] if sb.syntax_check else 'N/A'}
+  Import check: {sb.import_check[:300] if sb.import_check else 'N/A'}
+  Smoke test: {sb.smoke_test[:300] if sb.smoke_test else 'N/A'}
+  Error: {sb.error}
+"""
+                if sb.error:
+                    sandbox_context += "\nNOTE: Sandbox validation encountered an error but the review should still proceed."
+
         prompt = f"""You are reviewing a deliverable from the {message.sender.value} agent.
 
 ARTIFACT TYPE: {original_artifact_type}
 DELIVERABLE:
 {message.payload.content}
-
+{sandbox_context}
 Perform a thorough review. Check for:
 
 **If reviewing CODE:**
@@ -153,6 +172,15 @@ Please submit your review again with corrected arguments."""
             is_approved = "**APPROVED**" in first_lines or first_lines.lstrip().startswith("APPROVED")
             verdict = "approved" if is_approved else "needs_revision"
 
+        critic_metadata: dict[str, str] = {
+            "review_result": verdict,
+            "artifact_type": original_artifact_type,
+        }
+        if sandbox_context and sb is not None:
+            critic_metadata["sandbox_passed"] = str(sb.passed)
+            if sb.error and sb.error not in ("docker_unavailable", "docker_not_found"):
+                critic_metadata["sandbox_error"] = sb.error
+
         if verdict == "approved":
             return self.create_message(
                 recipient=AgentRole.PM,
@@ -160,10 +188,7 @@ Please submit your review again with corrected arguments."""
                 project_id=message.project_id,
                 task_id=message.task_id,
                 content=review_content,
-                metadata={
-                    "review_result": "approved",
-                    "artifact_type": original_artifact_type,
-                },
+                metadata=critic_metadata,
             )
         else:
             return self.create_message(
@@ -172,10 +197,7 @@ Please submit your review again with corrected arguments."""
                 project_id=message.project_id,
                 task_id=message.task_id,
                 content=review_content,
-                metadata={
-                    "review_result": "needs_revision",
-                    "artifact_type": original_artifact_type,
-                },
+                metadata=critic_metadata,
             )
 
     async def _handle_question(self, message: AgentMessage) -> AgentMessage | None:
