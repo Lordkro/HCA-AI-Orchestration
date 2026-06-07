@@ -20,6 +20,7 @@ from hca.core.models import (
 )
 from hca.core.ollama_client import OllamaClient
 from hca.core.tools import WRITE_FILE_TOOL, format_validation_errors, validate_and_log
+from hca.orchestrator.sandbox import SandboxExecutor
 from hca.orchestrator.workspace_manager import WorkspaceManager
 
 logger = structlog.get_logger()
@@ -125,7 +126,7 @@ Please call write_file again with corrected arguments."""
             valid_calls, message.project_id, message.task_id
         )
 
-        # Init git repo and commit
+        # Init git repo and commit (from tool calls)
         if artifacts:
             await WorkspaceManager.init_project_repo(message.project_id)
             await WorkspaceManager.commit_workspace(
@@ -140,7 +141,30 @@ Please call write_file again with corrected arguments."""
                 await self.db.create_artifact(artifact)
                 await self._write_to_workspace(artifact, message.project_id)
 
+        # Run sandbox validation if code was produced
+        sandbox_result: dict | None = None
+        if artifacts:
+            sandbox = SandboxExecutor()
+            sb = await sandbox.validate_project(message.project_id)
+            sandbox_result = sb.to_dict()
+            if not sb.passed and sb.error not in ("docker_unavailable", "docker_not_found"):
+                logger.warning(
+                    "coder_sandbox_failed",
+                    task_id=message.task_id,
+                    project_id=message.project_id,
+                    error=sb.error,
+                )
+
         artifact_names = [a.filename for a in artifacts]
+        metadata: dict[str, str] = {
+            "artifact_type": "code",
+            "file_count": str(len(artifacts)),
+        }
+        if sandbox_result:
+            metadata["sandbox_passed"] = str(sandbox_result.get("passed", False))
+            metadata["sandbox_error"] = sandbox_result.get("error", "")
+            if sandbox_result.get("syntax_check"):
+                metadata["sandbox_syntax"] = sandbox_result["syntax_check"][:200]
 
         return self.create_message(
             recipient=AgentRole.PM,
@@ -149,7 +173,7 @@ Please call write_file again with corrected arguments."""
             task_id=message.task_id,
             content=response or f"Created {len(artifacts)} files",
             artifacts=artifact_names,
-            metadata={"artifact_type": "code", "file_count": str(len(artifacts))},
+            metadata=metadata,
         )
 
     async def _process_write_file_calls(
@@ -237,18 +261,40 @@ Please call write_file with corrected arguments."""
             valid_calls, message.project_id, message.task_id
         )
 
-        # Commit changes
+        # Commit changes from tool calls
         if artifacts:
             await WorkspaceManager.commit_workspace(
                 message.project_id,
                 f"Revision for task {message.task_id}",
             )
 
+        # Fall back to regex parsing if no tool calls were made
         if not artifacts and response:
             artifacts = self._parse_file_outputs(response, message.project_id, message.task_id)
             for artifact in artifacts:
                 await self.db.create_artifact(artifact)
                 await self._write_to_workspace(artifact, message.project_id)
+
+        # Run sandbox validation after all artifacts are written
+        sandbox_result: dict | None = None
+        if artifacts:
+            sandbox = SandboxExecutor()
+            sb = await sandbox.validate_project(message.project_id)
+            sandbox_result = sb.to_dict()
+            if not sb.passed and sb.error not in ("docker_unavailable", "docker_not_found"):
+                logger.warning(
+                    "coder_revision_sandbox_failed",
+                    task_id=message.task_id,
+                    project_id=message.project_id,
+                    error=sb.error,
+                )
+
+        metadata: dict[str, str] = {"artifact_type": "code", "revision": "true"}
+        if sandbox_result:
+            metadata["sandbox_passed"] = str(sandbox_result.get("passed", False))
+            metadata["sandbox_error"] = sandbox_result.get("error", "")
+            if sandbox_result.get("syntax_check"):
+                metadata["sandbox_syntax"] = sandbox_result["syntax_check"][:200]
 
         return self.create_message(
             recipient=AgentRole.PM,
@@ -257,7 +303,7 @@ Please call write_file with corrected arguments."""
             task_id=message.task_id,
             content=response or f"Fixed {len(artifacts)} files",
             artifacts=[a.filename for a in artifacts],
-            metadata={"artifact_type": "code", "revision": "true"},
+            metadata=metadata,
         )
 
     async def _handle_question(self, message: AgentMessage) -> AgentMessage | None:
