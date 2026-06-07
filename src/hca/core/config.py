@@ -2,6 +2,73 @@
 
 from pydantic_settings import BaseSettings
 
+# ──────────────────────────────────────────────
+# Hardware compatibility reference
+# Maps VRAM tiers to recommended model combos.
+# Used by the health endpoint & hardware guide.
+# ──────────────────────────────────────────────
+HARDWARE_TIERS: dict[str, dict[str, str | int]] = {
+    "high": {
+        "vram": "≥24 GB",
+        "default_model": "qwen3:14b",
+        "coder_model": "qwen2.5-coder:14b",
+        "quantization": "Q4_K_M",
+        "num_ctx": 8192,
+    },
+    "medium": {
+        "vram": "12-24 GB",
+        "default_model": "qwen3:8b",
+        "coder_model": "qwen2.5-coder:7b",
+        "quantization": "Q4_K_M",
+        "num_ctx": 8192,
+    },
+    "low": {
+        "vram": "8-12 GB",
+        "default_model": "llama3.2:3b",
+        "coder_model": "qwen2.5-coder:3b",
+        "quantization": "Q4_K_M",
+        "num_ctx": 4096,
+    },
+    "minimal": {
+        "vram": "6-8 GB",
+        "default_model": "phi-4:latest",
+        "coder_model": "phi-4:latest",
+        "quantization": "Q4_K_M",
+        "num_ctx": 4096,
+    },
+    "tiny": {
+        "vram": "<6 GB",
+        "default_model": "llama3.2:1b",
+        "coder_model": "qwen2.5-coder:1.5b",
+        "quantization": "Q4_K_M",
+        "num_ctx": 2048,
+    },
+}
+
+HARDWARE_BACKENDS: dict[str, dict[str, str]] = {
+    "cpu": {
+        "label": "CPU-only",
+        "image": "ollama/ollama",
+        "tag": "latest",
+        "compose_profile": "cpu",
+        "note": "Slowest but most compatible.",
+    },
+    "nvidia": {
+        "label": "NVIDIA CUDA",
+        "image": "ollama/ollama",
+        "tag": "latest",
+        "compose_profile": "nvidia",
+        "note": "Requires nvidia-container-toolkit & --profile nvidia.",
+    },
+    "rocm": {
+        "label": "AMD ROCm",
+        "image": "ollama/ollama:rocm",
+        "tag": "rocm",
+        "compose_profile": "rocm",
+        "note": "ROCm-only image; /dev/kfd + /dev/dri passthrough.",
+    },
+}
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
@@ -73,6 +140,9 @@ class Settings(BaseSettings):
     workspace_retention_days: int = 7  # Clean up workspaces older than 7 days
     workspace_max_count: int = 100  # Keep only the 100 most recent workspaces
 
+    # --- Model Puller ---
+    ollama_models_to_pull: str = "qwen3:14b qwen2.5-coder:14b"
+
     def get_agent_model(self, agent_name: str) -> str:
         """Get the model for a specific agent, falling back to default."""
         overrides = {
@@ -96,6 +166,20 @@ class Settings(BaseSettings):
         }
         val = overrides.get(agent_name, 0.0)
         return val if val != 0.0 else self.ollama_default_temperature
+
+    def get_recommended_models(self, tier: str = "medium") -> dict[str, str]:
+        """Return recommended models for a hardware tier.
+
+        Tier must be one of: high, medium, low, minimal, tiny.
+        Returns a dict with keys: default_model, coder_model, num_ctx.
+        """
+        info = HARDWARE_TIERS.get(tier, HARDWARE_TIERS["medium"])
+        return {
+            "default_model": str(info["default_model"]),
+            "coder_model": str(info["coder_model"]),
+            "quantization": str(info.get("quantization", "")),
+            "num_ctx": str(info.get("num_ctx", 8192)),
+        }
 
     def get_agent_top_p(self, agent_name: str) -> float:
         """Get the top_p for a specific agent, falling back to default."""
