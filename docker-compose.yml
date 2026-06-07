@@ -3,20 +3,31 @@
 # ============================================================
 # Autonomous AI development team powered by Ollama
 #
-# Usage:
-#   docker compose up              - Start all services
-#   docker compose up -d           - Start in background
-#   docker compose down            - Stop all services
-#   docker compose logs -f         - Follow logs
-#   docker compose logs -f agent   - Follow agent logs only
+# Hardware profiles:
+#   Default (CPU)         – docker compose up
+#   NVIDIA GPU            – docker compose --profile nvidia up
+#   AMD ROCm GPU          – docker compose --profile rocm up
+#   One-time model pull   – docker compose --profile setup run model-puller
+#
+# Environment variables (OLLAMA_IMAGE, OLLAMA_TAG, etc.) can be
+# overridden in .env or via the shell.
 # ============================================================
 
 services:
   # --------------------------------------------------------
-  # Ollama - Local LLM inference with ROCm (AMD GPU)
+  # Ollama – Local LLM inference
+  # --------------------------------------------------------
+  # The default profile ('cpu') uses the standard ollama/ollama
+  # image which runs on CPU or automatically detects an NVIDIA GPU.
+  #
+  # For dedicated GPU profiles use:
+  #   docker compose --profile nvidia up   (NVIDIA CUDA)
+  #   docker compose --profile rocm up     (AMD ROCm)
+  #
+  # Only ONE Ollama service should be active at a time.
   # --------------------------------------------------------
   ollama:
-    image: ollama/ollama:rocm
+    image: ${OLLAMA_IMAGE:-ollama/ollama}:${OLLAMA_TAG:-latest}
     container_name: hca-ollama
     init: true
     restart: unless-stopped
@@ -24,21 +35,54 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
-    devices:
-      - /dev/kfd:/dev/kfd
-      - /dev/dri:/dev/dri
-    group_add:
-      - "39"    # video
-      - "105"   # render
     environment:
-      - OLLAMA_NUM_PARALLEL=1
-      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-1}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-1}
+      - OLLAMA_FLASH_ATTENTION=${OLLAMA_FLASH_ATTENTION:-1}
+      - OLLAMA_LOAD_TIMEOUT=${OLLAMA_LOAD_TIMEOUT:-10m}
+      - OLLAMA_GPU_OVERHEAD=${OLLAMA_GPU_OVERHEAD:-3221225472}
+      - OLLAMA_DEBUG=${OLLAMA_DEBUG:-0}
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    # Default CPU profile – active when no --profile flag is given
+    profiles:
+      - cpu
+
+  # --------------------------------------------------------
+  # NVIDIA GPU – activates via --profile nvidia
+  # --------------------------------------------------------
+  ollama-nvidia:
+    image: ${OLLAMA_IMAGE_NVIDIA:-ollama/ollama}:${OLLAMA_TAG_NVIDIA:-latest}
+    container_name: hca-ollama
+    init: true
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    profiles:
+      - nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${NVIDIA_VISIBLE_DEVICES:-all}
+              capabilities: [gpu]
+    environment:
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-2}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-2}
       - OLLAMA_FLASH_ATTENTION=1
-      - OLLAMA_LOAD_TIMEOUT=10m
-      - OLLAMA_GPU_OVERHEAD=3221225472
-      - ROCR_VISIBLE_DEVICES=0
-      - HSA_OVERRIDE_GFX_VERSION=11.0.0
-      - OLLAMA_DEBUG=1
+      - OLLAMA_LOAD_TIMEOUT=${OLLAMA_LOAD_TIMEOUT:-10m}
+      - OLLAMA_GPU_OVERHEAD=${OLLAMA_GPU_OVERHEAD:-2147483648}
+      - OLLAMA_DEBUG=${OLLAMA_DEBUG:-0}
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
+      - CUDA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 30s
@@ -47,7 +91,44 @@ services:
       start_period: 20s
 
   # --------------------------------------------------------
-  # Redis - Message bus for agent communication
+  # AMD ROCm GPU – activates via --profile rocm
+  # --------------------------------------------------------
+  ollama-rocm:
+    image: ${OLLAMA_IMAGE_ROCM:-ollama/ollama:rocm}
+    container_name: hca-ollama
+    init: true
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    profiles:
+      - rocm
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - "39"    # video
+      - "105"   # render
+    environment:
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-1}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-1}
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_LOAD_TIMEOUT=${OLLAMA_LOAD_TIMEOUT:-10m}
+      - OLLAMA_GPU_OVERHEAD=${OLLAMA_GPU_OVERHEAD:-3221225472}
+      - ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-0}
+      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.0}
+      - OLLAMA_DEBUG=${OLLAMA_DEBUG:-0}
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # --------------------------------------------------------
+  # Redis – Message bus for agent communication
   # --------------------------------------------------------
   redis:
     image: redis:7-alpine
@@ -65,7 +146,7 @@ services:
       retries: 5
 
   # --------------------------------------------------------
-  # HCA Orchestrator - Agents + API in one service
+  # HCA Orchestrator – Agents + API in one service
   # --------------------------------------------------------
   orchestrator:
     build:
@@ -91,26 +172,26 @@ services:
       - PYTHONUNBUFFERED=1
 
   # --------------------------------------------------------
-  # Model Puller - One-time setup to pull required models
+  # Model Puller – One-time setup to pull required models
   # --------------------------------------------------------
   model-puller:
     image: curlimages/curl:latest
     container_name: hca-model-puller
+    profiles:
+      - setup
     depends_on:
       ollama:
         condition: service_healthy
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
-        echo "Pulling default model: qwen3:14b ..."
-        curl -s http://ollama:11434/api/pull -d '{"name": "qwen3:14b"}'
-        echo ""
-        echo "Pulling coder model: qwen2.5-coder:14b ..."
-        curl -s http://ollama:11434/api/pull -d '{"name": "qwen2.5-coder:14b"}'
-        echo ""
-        echo "All models pulled successfully!"
-    profiles:
-      - setup
+        echo "=== Pulling configured models ==="
+        for model in ${OLLAMA_MODELS_TO_PULL:-qwen3:14b qwen2.5-coder:14b}; do
+          echo "Pulling $model ..."
+          curl -s -S -o /dev/null -w "%{http_code}" http://ollama:11434/api/pull -d "{\"name\": \"$model\"}"
+          echo ""
+        done
+        echo "=== All models pulled successfully ==="
 
 volumes:
   ollama_data:
