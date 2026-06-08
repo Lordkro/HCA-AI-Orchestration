@@ -3,6 +3,7 @@
 Provides a robust async client with:
 - Retry logic with exponential backoff
 - Token/context window estimation and management
+- LLM response caching (in-memory LRU)
 - Streaming and non-streaming chat
 - Model preloading and validation
 - Performance metrics tracking
@@ -11,10 +12,13 @@ Provides a robust async client with:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
 import structlog
@@ -34,27 +38,133 @@ logger = structlog.get_logger()
 # Token Estimation
 # ============================================================
 
-# Rough heuristic: ~4 characters per token for English text.
-# This is intentionally conservative to avoid overflowing context.
+# Rough heuristic: ~4 characters per token for English text,
+# ~3 for code/symbol-dense text.  Conservative to avoid overflow.
 CHARS_PER_TOKEN_ESTIMATE = 3.5
+
+# Characters that signal code-heavy content (denser tokenisation)
+_CODE_HEAVY_CHARS = set("{}[]();:<>!=+-*/&|^~#@\"'\\`")
 
 
 def estimate_tokens(text: str) -> int:
-    """Estimate the token count for a string (conservative)."""
-    return int(len(text) / CHARS_PER_TOKEN_ESTIMATE)
+    """Estimate the token count for a string.
+
+    Uses a slightly better heuristic that accounts for code density.
+    Conservative by design to avoid overflowing the context window.
+    """
+    if not text:
+        return 0
+    ratio = sum(1 for ch in text if ch in _CODE_HEAVY_CHARS) / max(len(text), 1)
+    # Code-heavy content: ~3 chars/token; prose: ~4 chars/token
+    effective_cpt = CHARS_PER_TOKEN_ESTIMATE - ratio
+    return max(1, int(len(text) / max(effective_cpt, 2.0)))
 
 
 def estimate_messages_tokens(messages: list[dict[str, str]]) -> int:
     """Estimate total tokens across a list of chat messages."""
     total = 0
     for msg in messages:
-        # Each message has overhead (~4 tokens for role + formatting)
         total += 4
         total += estimate_tokens(msg.get("content", ""))
-    total += 2  # Start/end tokens
+    total += 2
     return total
 
 
+# ============================================================
+# LRU Cache for LLM Responses
+# ============================================================
+
+
+class _LLMResponseCache:
+    """Size-bounded in-memory cache for LLM responses.
+
+    Keys are SHA-256 hashes of (model, messages_json, temperature, top_p).  This
+    catches repeated identical prompts within a short window — common during
+    tool-call retry loops and parallel agent runs.
+    """
+
+    def __init__(self, maxsize: int = 256) -> None:
+        self._cache: OrderedDict[str, tuple[str | None, list[dict] | None]] = OrderedDict()
+        self._maxsize = maxsize
+        self._hits = 0
+        self._misses = 0
+
+    @staticmethod
+    def _make_key(
+        model: str,
+        messages: list[dict[str, str]],
+        temperature: float,
+        top_p: float,
+        max_tokens: int,
+    ) -> str:
+        raw = json.dumps(
+            [model, messages, temperature, top_p, max_tokens],
+            sort_keys=True,
+            default=str,
+        )
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    def get(self, key: str) -> tuple[str | None, list[dict] | None] | None:
+        result = self._cache.get(key)
+        if result is not None:
+            self._hits += 1
+            self._cache.move_to_end(key)
+            return result
+        self._misses += 1
+        return None
+
+    def put(
+        self,
+        key: str,
+        text: str | None,
+        tool_calls: list[dict] | None,
+    ) -> None:
+        self._cache[key] = (text, tool_calls)
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._maxsize:
+            self._cache.popitem(last=False)
+
+    @property
+    def stats(self) -> dict[str, Any]:
+        total = self._hits + self._misses
+        return {
+            "size": len(self._cache),
+            "maxsize": self._maxsize,
+            "hits": self._hits,
+            "misses": self._misses,
+            "hit_rate": round(self._hits / total, 3) if total else 0,
+        }
+
+
+# ============================================================
+# Cost Estimation
+# ============================================================
+
+# Approximate per-1K-token costs (USD) for popular local models.
+# These are rough guidelines — actual costs depend on hardware and energy.
+_MODEL_PRICING: dict[str, dict[str, float]] = {
+    "qwen3:14b": {"input_per_1k": 0.002, "output_per_1k": 0.002},
+    "qwen2.5-coder:14b": {"input_per_1k": 0.002, "output_per_1k": 0.002},
+    "qwen3:8b": {"input_per_1k": 0.001, "output_per_1k": 0.001},
+    "qwen2.5-coder:7b": {"input_per_1k": 0.001, "output_per_1k": 0.001},
+    "llama3.2:3b": {"input_per_1k": 0.0005, "output_per_1k": 0.0005},
+    "qwen2.5-coder:3b": {"input_per_1k": 0.0005, "output_per_1k": 0.0005},
+    "phi-4:latest": {"input_per_1k": 0.001, "output_per_1k": 0.001},
+    "llama3.2:1b": {"input_per_1k": 0.0003, "output_per_1k": 0.0003},
+}
+_DEFAULT_PRICING = {"input_per_1k": 0.001, "output_per_1k": 0.001}
+
+
+def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+    """Estimate the USD cost of an LLM call."""
+    pricing = _MODEL_PRICING.get(model, _DEFAULT_PRICING)
+    input_cost = (input_tokens / 1000) * pricing["input_per_1k"]
+    output_cost = (output_tokens / 1000) * pricing["output_per_1k"]
+    return round(input_cost + output_cost, 6)
+
+
+# ============================================================
+# Ollama Client
 # ============================================================
 # Data Classes
 # ============================================================
@@ -70,6 +180,11 @@ class GenerationStats:
     total_tokens: int = 0
     duration_seconds: float = 0.0
     tokens_per_second: float = 0.0
+    cost_estimate_usd: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.cost_estimate_usd and self.total_tokens > 0:
+            self.cost_estimate_usd = estimate_cost(self.model, self.prompt_tokens, self.completion_tokens)
 
 
 @dataclass
@@ -81,6 +196,7 @@ class ClientStats:
     total_retries: int = 0
     total_tokens_used: int = 0
     total_duration_seconds: float = 0.0
+    total_cost_estimate_usd: float = 0.0
     requests_by_model: dict[str, int] = field(default_factory=dict)
 
     def record(self, stats: GenerationStats) -> None:
@@ -88,6 +204,7 @@ class ClientStats:
         self.total_requests += 1
         self.total_tokens_used += stats.total_tokens
         self.total_duration_seconds += stats.duration_seconds
+        self.total_cost_estimate_usd += stats.cost_estimate_usd
         model_count = self.requests_by_model.get(stats.model, 0)
         self.requests_by_model[stats.model] = model_count + 1
 
@@ -127,6 +244,7 @@ class OllamaClient:
     Features:
     - Automatic retries with exponential backoff
     - Token estimation and context window management
+    - In-memory LLM response cache (LRU, configurable size)
     - Streaming and non-streaming chat completions
     - Generation statistics tracking
     - Model availability validation
@@ -143,6 +261,7 @@ class OllamaClient:
         max_concurrent: int = 1,
         circuit_breaker_failure_threshold: int = 5,
         circuit_breaker_recovery_timeout: float = 60.0,
+        cache_maxsize: int = 256,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.default_model = default_model
@@ -164,6 +283,18 @@ class OllamaClient:
         self._cb_failure_count = 0
         self._cb_last_failure_time = 0.0
         self._cb_tripped_count = 0
+        self._cache = _LLMResponseCache(maxsize=cache_maxsize)
+        self._last_stats: GenerationStats | None = None
+
+    @property
+    def last_stats(self) -> GenerationStats | None:
+        """GenerationStats from the most recent chat call."""
+        return self._last_stats
+
+    @property
+    def cache_stats(self) -> dict[str, Any]:
+        """LLM response cache statistics."""
+        return self._cache.stats
 
     async def _acquire_concurrency_slot(self) -> None:
         """Acquire a concurrency slot, blocking if at capacity."""
@@ -485,6 +616,7 @@ class OllamaClient:
         top_p: float = 0.9,
         max_tokens: int = 4096,
         auto_trim: bool = True,
+        use_cache: bool = True,
     ) -> str:
         """Chat completion using Ollama's /api/chat endpoint.
 
@@ -495,11 +627,11 @@ class OllamaClient:
             top_p: Nucleus sampling parameter.
             max_tokens: Max tokens to generate.
             auto_trim: If True, automatically trim messages to fit context window.
+            use_cache: If True, check the in-memory response cache before calling the LLM.
         """
         model = model or self.default_model
         self._cb_check()
 
-        # Context window management
         if auto_trim:
             messages = self.trim_messages_to_fit(messages, max_completion=max_tokens)
         else:
@@ -510,6 +642,28 @@ class OllamaClient:
                     f"exceeds context window ({self.num_ctx} tokens). "
                     f"Only {available} tokens available for completion."
                 )
+
+        # LLM response cache: skip the HTTP call for identical prompts
+        if use_cache:
+            cache_key = self._cache._make_key(model, messages, temperature, top_p, max_tokens)
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                cached_text, _ = cached
+                logger.info(
+                    "ollama_chat_cache_hit",
+                    model=model,
+                    message_count=len(messages),
+                )
+                self._last_stats = GenerationStats(
+                    model=model,
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    total_tokens=0,
+                    duration_seconds=0,
+                    tokens_per_second=0,
+                    cost_estimate_usd=0,
+                )
+                return cached_text or ""
 
         payload = {
             "model": model,
@@ -543,7 +697,6 @@ class OllamaClient:
             self._release_concurrency_slot()
         elapsed = time.monotonic() - start
 
-        # Strip qwen3 <think>...</think> blocks from output
         text = re.sub(r"<think>[\s\S]*?</think>\s*", "", text).strip()
 
         eval_count = final_data.get("eval_count", estimate_tokens(text))
@@ -557,6 +710,7 @@ class OllamaClient:
             duration_seconds=elapsed,
             tokens_per_second=eval_count / elapsed if elapsed > 0 else 0,
         )
+        self._last_stats = stats
         self.stats.record(stats)
         record_ollama_request(model, "ok", elapsed, prompt_eval_count, eval_count)
 
@@ -570,6 +724,10 @@ class OllamaClient:
             tok_per_s=round(stats.tokens_per_second, 1),
         )
         self._cb_record_success()
+
+        if use_cache:
+            self._cache.put(cache_key, text, None)
+
         return text
 
     async def chat_with_tools(
@@ -582,6 +740,7 @@ class OllamaClient:
         top_p: float = 0.9,
         max_tokens: int = 4096,
         auto_trim: bool = True,
+        use_cache: bool = True,
     ) -> tuple[str, list[dict]]:
         """Chat completion with tool/function calling support.
 
@@ -597,12 +756,35 @@ class OllamaClient:
             top_p: Nucleus sampling parameter.
             max_tokens: Max tokens to generate.
             auto_trim: If True, trim messages to fit context window.
+            use_cache: If True, check the in-memory response cache before calling the LLM.
         """
         model = model or self.default_model
         self._cb_check()
 
         if auto_trim:
             messages = self.trim_messages_to_fit(messages, max_completion=max_tokens)
+
+        # LLM response cache: skip the HTTP call for identical prompts
+        if use_cache:
+            cache_key = self._cache._make_key(model, messages, temperature, top_p, max_tokens)
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                cached_text, cached_tool_calls = cached
+                logger.info(
+                    "ollama_chat_with_tools_cache_hit",
+                    model=model,
+                    message_count=len(messages),
+                )
+                self._last_stats = GenerationStats(
+                    model=model,
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    total_tokens=0,
+                    duration_seconds=0,
+                    tokens_per_second=0,
+                    cost_estimate_usd=0,
+                )
+                return (cached_text or "", cached_tool_calls or [])
 
         payload: dict = {
             "model": model,
@@ -666,6 +848,7 @@ class OllamaClient:
             duration_seconds=elapsed,
             tokens_per_second=eval_count / elapsed if elapsed > 0 else 0,
         )
+        self._last_stats = stats
         self.stats.record(stats)
         record_ollama_request(model, "ok", elapsed, prompt_eval_count, eval_count)
         self._cb_record_success()
@@ -679,6 +862,10 @@ class OllamaClient:
             completion_tokens=stats.completion_tokens,
             duration_s=round(elapsed, 2),
         )
+
+        if use_cache:
+            self._cache.put(cache_key, text, tool_calls)
+
         return text, tool_calls
 
     async def preload_model(self, model: str | None = None) -> bool:
@@ -728,12 +915,14 @@ class OllamaClient:
             "total_retries": self.stats.total_retries,
             "total_tokens_used": self.stats.total_tokens_used,
             "total_duration_seconds": round(self.stats.total_duration_seconds, 2),
+            "total_cost_estimate_usd": round(self.stats.total_cost_estimate_usd, 4),
             "avg_tokens_per_second": round(
                 self.stats.total_tokens_used / self.stats.total_duration_seconds, 1
             )
             if self.stats.total_duration_seconds > 0
             else 0,
             "requests_by_model": self.stats.requests_by_model,
+            "cache": self._cache.stats,
         }
 
     async def close(self) -> None:

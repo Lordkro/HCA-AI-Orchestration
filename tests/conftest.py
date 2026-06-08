@@ -23,6 +23,7 @@ from hca.core.models import (
     MessageType,
     Priority,
 )
+from hca.core.ollama_client import GenerationStats
 
 # ============================================================
 # Database Fixture (real SQLite in temp dir)
@@ -51,6 +52,7 @@ class MockOllamaClient:
         self.default_response = default_response
         self.chat_calls: list[dict[str, Any]] = []
         self._health = True
+        self.last_stats: GenerationStats | None = None
 
         # Expose same attributes as real client
         self.base_url = "http://mock:11434"
@@ -70,6 +72,7 @@ class MockOllamaClient:
         top_p: float = 0.9,
         max_tokens: int = 4096,
         auto_trim: bool = False,
+        use_cache: bool = True,
     ) -> str:
         self.chat_calls.append(
             {
@@ -78,6 +81,7 @@ class MockOllamaClient:
                 "temperature": temperature,
                 "top_p": top_p,
                 "max_tokens": max_tokens,
+                "use_cache": use_cache,
             }
         )
         return self.default_response
@@ -92,6 +96,7 @@ class MockOllamaClient:
         top_p: float = 0.9,
         max_tokens: int = 4096,
         auto_trim: bool = True,
+        use_cache: bool = True,
     ) -> tuple[str, list[dict]]:
         self.chat_calls.append(
             {
@@ -101,6 +106,7 @@ class MockOllamaClient:
                 "temperature": temperature,
                 "top_p": top_p,
                 "max_tokens": max_tokens,
+                "use_cache": use_cache,
             }
         )
         return self.default_response, []
@@ -114,8 +120,16 @@ class MockOllamaClient:
     async def close(self) -> None:
         pass
 
+    @property
+    def cache_stats(self) -> dict[str, Any]:
+        return {"size": 0, "maxsize": 0, "hits": 0, "misses": 0, "hit_rate": 0.0}
+
     def get_stats(self) -> dict[str, Any]:
-        return {"total_requests": len(self.chat_calls)}
+        return {
+            "total_requests": len(self.chat_calls),
+            "total_cost_estimate_usd": 0.0,
+            "cache": self.cache_stats,
+        }
 
 
 @pytest.fixture

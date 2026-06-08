@@ -223,4 +223,162 @@ class TestOllamaClientInit:
         stats = client.get_stats()
         assert stats["total_requests"] == 0
         assert stats["total_failures"] == 0
+        assert stats["total_cost_estimate_usd"] == 0.0
+        assert "cache" in stats
         assert isinstance(stats["requests_by_model"], dict)
+
+    def test_get_stats_includes_cache(self) -> None:
+        client = OllamaClient()
+        cache = client.cache_stats
+        assert cache["size"] == 0
+        assert cache["hits"] == 0
+        assert cache["misses"] == 0
+
+
+# ============================================================
+# LRU Cache Tests
+# ============================================================
+
+
+class TestLLMResponseCache:
+    """Tests for the in-memory LLM response cache."""
+
+    def test_cache_miss_returns_none(self) -> None:
+        from hca.core.ollama_client import _LLMResponseCache
+
+        cache = _LLMResponseCache(maxsize=4)
+        key = cache._make_key("model", [{"role": "user", "content": "hi"}], 0.7, 0.9, 100)
+        assert cache.get(key) is None
+
+    def test_cache_hit_after_put(self) -> None:
+        from hca.core.ollama_client import _LLMResponseCache
+
+        cache = _LLMResponseCache(maxsize=4)
+        key = cache._make_key("model", [{"role": "user", "content": "hi"}], 0.7, 0.9, 100)
+        cache.put(key, "hello", [])
+        result = cache.get(key)
+        assert result is not None
+        assert result[0] == "hello"
+        assert result[1] == []
+
+    def test_cache_evicts_lru(self) -> None:
+        from hca.core.ollama_client import _LLMResponseCache
+
+        cache = _LLMResponseCache(maxsize=2)
+        keys = []
+        for i in range(3):
+            k = cache._make_key("m", [{"role": "user", "content": str(i)}], 0.7, 0.9, 100)
+            cache.put(k, f"resp-{i}", [])
+            keys.append(k)
+        # First key should be evicted
+        assert cache.get(keys[0]) is None
+        # Second and third should still be there
+        assert cache.get(keys[1]) is not None
+        assert cache.get(keys[2]) is not None
+
+    def test_cache_tracks_hit_rate(self) -> None:
+        from hca.core.ollama_client import _LLMResponseCache
+
+        cache = _LLMResponseCache(maxsize=4)
+        key = cache._make_key("m", [{"role": "user", "content": "hi"}], 0.7, 0.9, 100)
+        # Miss
+        cache.get(key)
+        assert cache.stats["hits"] == 0
+        assert cache.stats["misses"] == 1
+        # Hit
+        cache.put(key, "hello", [])
+        cache.get(key)
+        assert cache.stats["hits"] == 1
+        assert cache.stats["misses"] == 1
+        assert cache.stats["hit_rate"] == 0.5
+
+    def test_cache_key_different_model(self) -> None:
+        from hca.core.ollama_client import _LLMResponseCache
+
+        cache = _LLMResponseCache(maxsize=4)
+        k1 = cache._make_key("model-a", [{"role": "user", "content": "hi"}], 0.7, 0.9, 100)
+        k2 = cache._make_key("model-b", [{"role": "user", "content": "hi"}], 0.7, 0.9, 100)
+        cache.put(k1, "resp-a", [])
+        # Different model → different key → miss
+        assert cache.get(k2) is None
+        assert cache.get(k1) is not None
+
+
+# ============================================================
+# Cost Estimation Tests
+# ============================================================
+
+
+class TestCostEstimation:
+    """Tests for the cost estimation helper."""
+
+    def test_estimate_cost_zero_tokens(self) -> None:
+        from hca.core.ollama_client import estimate_cost
+
+        assert estimate_cost("qwen3:14b", 0, 0) == 0.0
+
+    def test_estimate_cost_known_model(self) -> None:
+        from hca.core.ollama_client import estimate_cost
+
+        # 1000 input + 500 output tokens on qwen3:14b
+        # (1000/1000)*0.002 + (500/1000)*0.002 = 0.002 + 0.001 = 0.003
+        cost = estimate_cost("qwen3:14b", 1000, 500)
+        assert cost == 0.003
+
+    def test_estimate_cost_unknown_model_default(self) -> None:
+        from hca.core.ollama_client import estimate_cost
+
+        cost = estimate_cost("unknown:latest", 1000, 500)
+        # Uses default pricing: 0.001 per 1K for both
+        assert cost == 0.0015
+
+    def test_generation_stats_auto_cost(self) -> None:
+        stats = GenerationStats(
+            model="qwen3:14b",
+            prompt_tokens=1000,
+            completion_tokens=500,
+            total_tokens=1500,
+        )
+        assert stats.cost_estimate_usd == 0.003
+
+    def test_generation_stats_zero_cost(self) -> None:
+        stats = GenerationStats(
+            model="qwen3:14b",
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            cost_estimate_usd=0.0,
+        )
+        assert stats.cost_estimate_usd == 0.0
+
+    def test_client_stats_tracks_cost(self) -> None:
+        stats = ClientStats()
+        stats.record(GenerationStats(
+            model="qwen3:14b",
+            prompt_tokens=1000,
+            completion_tokens=500,
+            total_tokens=1500,
+        ))
+        stats.record(GenerationStats(
+            model="qwen3:8b",
+            prompt_tokens=500,
+            completion_tokens=200,
+            total_tokens=700,
+        ))
+        assert stats.total_cost_estimate_usd > 0
+        assert stats.total_requests == 2
+
+
+# ============================================================
+# Token Estimation (improved heuristic) Tests
+# ============================================================
+
+
+class TestImprovedTokenEstimation:
+    """Tests for the code-density-aware token estimator."""
+
+    def test_code_denser_than_prose(self) -> None:
+        # Code has more symbols → denser → more tokens per char
+        assert estimate_tokens("x" * 100) <= estimate_tokens(
+            "{" * 50 + "}" * 50
+        )

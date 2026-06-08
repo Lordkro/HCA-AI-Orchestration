@@ -602,6 +602,19 @@ class Database:
             row = await cursor.fetchone()
             return row["tokens_used"] if row else 0
 
+    async def add_task_tokens(self, task_id: str, tokens: int) -> int:
+        """Atomically add tokens to a task's usage counter (lightweight)."""
+        await self._execute(
+            "UPDATE tasks SET tokens_used = tokens_used + ? WHERE id = ?",
+            (tokens, task_id),
+        )
+        await self.db.commit()
+        async with self.db.execute(
+            "SELECT tokens_used FROM tasks WHERE id = ?", (task_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row["tokens_used"] if row else 0
+
     async def get_project_tokens(self, project_id: str) -> int:
         """Get the total tokens used by a project."""
         async with self.db.execute(
