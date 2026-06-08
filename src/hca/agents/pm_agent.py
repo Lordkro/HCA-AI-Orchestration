@@ -299,13 +299,14 @@ Please call create_task again with corrected arguments."""
         review_result = message.payload.metadata.get("review_result", "")
         task_id = message.task_id
 
-        # --- Critic approved → close the task and start the next one ---
-        if message.sender == AgentRole.CRITIC and review_result == "approved":
+        # --- Human or Critic approved → close the task ---
+        if review_result == "approved" and message.sender in (AgentRole.CRITIC, AgentRole.USER):
             self._set_activity("Approving task and assigning next")
             logger.info(
                 "pm_deliverable_approved",
                 project_id=message.project_id,
                 task_id=task_id,
+                reviewer=message.sender.value,
             )
             # REVIEW → APPROVED → DONE
             await self._transition_task(task_id, TaskState.APPROVED)
@@ -314,8 +315,8 @@ Please call create_task again with corrected arguments."""
             # Kick off the next pending task for this project
             return await self._assign_next_task(message.project_id)
 
-        # --- Critic rejected → revision cycle ---
-        if message.sender == AgentRole.CRITIC and review_result == "needs_revision":
+        # --- Human or Critic rejected → revision cycle ---
+        if review_result == "needs_revision" and message.sender in (AgentRole.CRITIC, AgentRole.USER):
             self._set_activity("Routing revision feedback")
             return await self._handle_feedback(message)
 

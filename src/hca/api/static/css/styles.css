@@ -985,3 +985,54 @@ main {
     .kanban-board { grid-template-columns: 1fr; }
     main { padding: 0.75rem; }
 }
+
+/* ============================================================
+   HITL — Human-in-the-Loop
+   ============================================================ */
+
+.hitl-section {
+    margin-top: 1rem;
+    padding: 0.8rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+
+.hitl-title {
+    font-size: 0.85rem;
+    margin-bottom: 0.5rem;
+    color: var(--accent-cyan);
+}
+
+.hitl-textarea {
+    width: 100%;
+    min-height: 60px;
+    padding: 0.5rem;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 0.8rem;
+    resize: vertical;
+    margin-bottom: 0.5rem;
+}
+
+.hitl-textarea:focus {
+    outline: none;
+    border-color: var(--accent-blue);
+}
+
+.hitl-buttons {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.btn-danger {
+    background: var(--accent-red);
+    color: #fff;
+}
+.btn-danger:hover {
+    opacity: 0.85;
+}

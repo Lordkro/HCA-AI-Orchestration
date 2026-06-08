@@ -445,3 +445,138 @@ class TestDeadLetterAPI:
         ac, _ = client
         r = await ac.post("/api/admin/dead-letter/no-such-id/replay")
         assert r.status_code == 404
+
+
+# ============================================================
+# HITL — Human-in-the-Loop
+# ============================================================
+
+
+class TestHITL:
+    """Tests for human-in-the-loop API endpoints."""
+
+    async def _setup(self, ac, db):
+        """Create a project and a task, return (project_id, task_id)."""
+        r = await ac.post("/api/projects/", json={"idea": "HITL test"})
+        pid = r.json()["project_id"]
+        task = Task(project_id=pid, title="Test task", description="do it")
+        await db.create_task(task)
+        return pid, task.id
+
+    @pytest.mark.asyncio
+    async def test_inject_feedback(self, client, db):
+        ac, _ = client
+        pid, tid = await self._setup(ac, db)
+
+        r = await ac.post(
+            f"/api/projects/{pid}/feedback",
+            json={"task_id": tid, "content": "Please add error handling"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "ok"
+        assert data["task_id"] == tid
+
+    @pytest.mark.asyncio
+    async def test_inject_feedback_missing_fields(self, client, db):
+        ac, _ = client
+        r = await ac.post("/api/projects/p1/feedback", json={})
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_inject_feedback_invalid_agent_role(self, client, db):
+        ac, _ = client
+        pid, tid = await self._setup(ac, db)
+        r = await ac.post(
+            f"/api/projects/{pid}/feedback",
+            json={"task_id": tid, "content": "fix it", "agent_role": "invalid_role"},
+        )
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_human_review_approve(self, client, db):
+        ac, _ = client
+        pid, tid = await self._setup(ac, db)
+        # Task must be in REVIEW state
+        await db.update_task_state(tid, TaskState.REVIEW)
+
+        r = await ac.post(
+            f"/api/projects/{pid}/review",
+            json={"task_id": tid, "verdict": "approved", "summary": "Looks good!"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["verdict"] == "approved"
+
+    @pytest.mark.asyncio
+    async def test_human_review_reject(self, client, db):
+        ac, _ = client
+        pid, tid = await self._setup(ac, db)
+        await db.update_task_state(tid, TaskState.REVIEW)
+
+        r = await ac.post(
+            f"/api/projects/{pid}/review",
+            json={"task_id": tid, "verdict": "needs_revision", "summary": "Fix the bugs"},
+        )
+        assert r.status_code == 200
+        assert r.json()["verdict"] == "needs_revision"
+
+    @pytest.mark.asyncio
+    async def test_human_review_non_review_task(self, client, db):
+        ac, _ = client
+        pid, tid = await self._setup(ac, db)
+        # Task is PENDING, not REVIEW
+        r = await ac.post(
+            f"/api/projects/{pid}/review",
+            json={"task_id": tid, "verdict": "approved"},
+        )
+        assert r.status_code == 400
+        assert "Only REVIEW tasks" in r.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_human_review_invalid_verdict(self, client, db):
+        ac, _ = client
+        pid, tid = await self._setup(ac, db)
+        r = await ac.post(
+            f"/api/projects/{pid}/review",
+            json={"task_id": tid, "verdict": "maybe"},
+        )
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_steer_task_priority(self, client, db):
+        ac, _ = client
+        pid, tid = await self._setup(ac, db)
+
+        r = await ac.patch(
+            f"/api/tasks/{tid}/steer",
+            json={"priority": "high"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["task"]["priority"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_steer_task_title(self, client, db):
+        ac, _ = client
+        pid, tid = await self._setup(ac, db)
+
+        r = await ac.patch(
+            f"/api/tasks/{tid}/steer",
+            json={"title": "Updated title"},
+        )
+        assert r.status_code == 200
+        assert r.json()["task"]["title"] == "Updated title"
+
+    @pytest.mark.asyncio
+    async def test_steer_task_not_found(self, client):
+        ac, _ = client
+        r = await ac.patch("/api/tasks/no-such-id/steer", json={"priority": "high"})
+        assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_steer_task_invalid_priority(self, client, db):
+        ac, _ = client
+        pid, tid = await self._setup(ac, db)
+        r = await ac.patch(f"/api/tasks/{tid}/steer", json={"priority": "urgent"})
+        assert r.status_code == 400
