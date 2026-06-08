@@ -524,3 +524,47 @@ class TestDiagnostics:
         assert stats["total_projects"] == 1
         assert stats["total_tasks"] == 1
         assert stats["total_artifacts"] == 1
+
+
+# ============================================================
+# Token Tracking
+# ============================================================
+
+
+class TestTokenTracking:
+    """Tests for lightweight token usage tracking."""
+
+    async def test_add_project_tokens_initial(self, db: Database) -> None:
+        p = await db.create_project(Project(name="P", description="", idea="x"))
+        total = await db.add_project_tokens(p.id, 100)
+        assert total == 100
+
+    async def test_add_project_tokens_cumulative(self, db: Database) -> None:
+        p = await db.create_project(Project(name="P", description="", idea="x"))
+        await db.add_project_tokens(p.id, 100)
+        total = await db.add_project_tokens(p.id, 50)
+        assert total == 150
+
+    async def test_get_project_tokens(self, db: Database) -> None:
+        p = await db.create_project(Project(name="P", description="", idea="x"))
+        await db.add_project_tokens(p.id, 200)
+        assert await db.get_project_tokens(p.id) == 200
+
+    async def test_add_task_tokens_initial(self, db: Database) -> None:
+        p = await db.create_project(Project(name="P", description="", idea="x"))
+        t = Task(project_id=p.id, title="T", description="")
+        await db.create_task(t)
+        total = await db.add_task_tokens(t.id, 100)
+        assert total == 100
+
+    async def test_add_task_tokens_cumulative(self, db: Database) -> None:
+        p = await db.create_project(Project(name="P", description="", idea="x"))
+        t = Task(project_id=p.id, title="T", description="")
+        await db.create_task(t)
+        await db.add_task_tokens(t.id, 100)
+        total = await db.add_task_tokens(t.id, 50)
+        assert total == 150
+
+    async def test_add_task_tokens_unknown_task(self, db: Database) -> None:
+        total = await db.add_task_tokens("nonexistent", 100)
+        assert total == 0

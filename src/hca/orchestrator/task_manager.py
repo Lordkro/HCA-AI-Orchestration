@@ -204,20 +204,24 @@ class TaskManager:
     # Token Budget
     # ------------------------------------------------------------------
 
-    async def record_tokens(self, project_id: str, task_id: str, tokens: int) -> bool:
+    async def record_tokens(
+        self,
+        project_id: str,
+        task_id: str,
+        tokens: int,
+        cost_estimate: float = 0.0,
+    ) -> bool:
         """Record tokens consumed by an LLM call.
 
         Updates both the task-level and project-level counters.
+        Uses lightweight atomic increments for task tokens.
         Returns True if still within budget, False if budget is exceeded.
         """
         if tokens <= 0:
             return True
 
-        # Update task-level counter
-        task = await self.db.get_task(task_id)
-        if task:
-            task.tokens_used += tokens
-            await self.db.update_task(task)
+        # Lightweight atomic task-level counter (no full task fetch/update)
+        await self.db.add_task_tokens(task_id, tokens)
 
         # Update project-level counter
         new_total = await self.db.add_project_tokens(project_id, tokens)

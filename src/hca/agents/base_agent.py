@@ -49,7 +49,12 @@ from hca.core.models import (
     Priority,
     TaskState,
 )
-from hca.core.ollama_client import OllamaCircuitBreakerOpenError, OllamaClient
+from hca.core.ollama_client import (
+    OllamaCircuitBreakerOpenError,
+    OllamaClient,
+    estimate_messages_tokens,
+    estimate_tokens,
+)
 
 if TYPE_CHECKING:
     from hca.orchestrator.task_manager import TaskManager
@@ -528,14 +533,20 @@ class BaseAgent(ABC):
         await self._append_history(pid, "assistant", response)
 
         # Track token usage at the project level (via TaskManager)
+        # Use real GenerationStats from the Ollama client if available.
         if self.task_manager and project_id:
-            from hca.core.ollama_client import estimate_tokens
-
-            prompt_tokens = sum(estimate_tokens(m["content"]) for m in messages)
-            response_tokens = estimate_tokens(response)
-            total_tokens = prompt_tokens + response_tokens
+            stats = self.ollama.last_stats
+            if stats and stats.total_tokens > 0:
+                total_tokens = stats.total_tokens
+                cost = stats.cost_estimate_usd
+            else:
+                # Fallback: rough estimate when stats are unavailable (cache hit etc.)
+                total_tokens = estimate_messages_tokens(messages) + estimate_tokens(response)
+                cost = 0.0
             try:
-                await self.task_manager.record_tokens(project_id, task_id, total_tokens)
+                await self.task_manager.record_tokens(
+                    project_id, task_id, total_tokens, cost_estimate=cost
+                )
             except Exception as exc:
                 logger.warning(
                     "token_tracking_failed",
@@ -609,14 +620,21 @@ class BaseAgent(ABC):
         if text_response:
             await self._append_history(pid, "assistant", text_response)
 
+        # Track token usage using real GenerationStats from OllamaClient.
         if self.task_manager and project_id:
-            from hca.core.ollama_client import estimate_tokens
-
-            prompt_tokens = sum(estimate_tokens(m["content"]) for m in messages)
-            response_tokens = estimate_tokens(text_response) if text_response else 0
-            total_tokens = prompt_tokens + response_tokens
+            stats = self.ollama.last_stats
+            if stats and stats.total_tokens > 0:
+                total_tokens = stats.total_tokens
+                cost = stats.cost_estimate_usd
+            else:
+                total_tokens = estimate_messages_tokens(messages) + (
+                    estimate_tokens(text_response) if text_response else 0
+                )
+                cost = 0.0
             try:
-                await self.task_manager.record_tokens(project_id, task_id, total_tokens)
+                await self.task_manager.record_tokens(
+                    project_id, task_id, total_tokens, cost_estimate=cost
+                )
             except Exception as exc:
                 logger.warning(
                     "token_tracking_failed",
