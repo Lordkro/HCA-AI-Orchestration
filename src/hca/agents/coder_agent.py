@@ -19,7 +19,14 @@ from hca.core.models import (
     TaskState,
 )
 from hca.core.ollama_client import OllamaClient
-from hca.core.tools import WRITE_FILE_TOOL, format_validation_errors, validate_and_log
+from hca.core.tools import (
+    INSTALL_PACKAGE_TOOL,
+    LIST_FILES_TOOL,
+    READ_FILE_TOOL,
+    WRITE_FILE_TOOL,
+    format_validation_errors,
+    validate_and_log,
+)
 from hca.orchestrator.sandbox import SandboxExecutor
 from hca.orchestrator.workspace_manager import WorkspaceManager
 
@@ -91,7 +98,7 @@ Create ALL necessary files for a working implementation. Include:
 - Requirements/dependency files (if needed)
 - README or usage notes"""
 
-        tool_defs = [WRITE_FILE_TOOL]
+        tool_defs = [WRITE_FILE_TOOL, LIST_FILES_TOOL, READ_FILE_TOOL, INSTALL_PACKAGE_TOOL]
         response, tool_calls = await self.think_with_tools(
             prompt, tool_defs, project_id=message.project_id,
             task_id=message.task_id, temperature=0.4,
@@ -112,7 +119,7 @@ Create ALL necessary files for a working implementation. Include:
 Original task:
 {message.payload.content[:500]}
 
-Please call write_file again with corrected arguments."""
+Please call write_file, list_files, read_file, or install_package with corrected arguments."""
             response, tool_calls = await self.think_with_tools(
                 fix_prompt, tool_defs, project_id=message.project_id,
                 task_id=message.task_id, temperature=0.3,
@@ -121,7 +128,10 @@ Please call write_file again with corrected arguments."""
                 tool_calls, tool_defs, agent_name=self.role.value
             )
 
-        # Process validated tool calls
+        # Execute auxiliary tool calls (list_files, read_file, install_package)
+        aux_results = await self._execute_aux_tools(valid_calls, message.project_id)
+
+        # Process write_file tool calls
         artifacts = await self._process_write_file_calls(
             valid_calls, message.project_id, message.task_id
         )
@@ -133,6 +143,33 @@ Please call write_file again with corrected arguments."""
                 message.project_id,
                 f"Coding iteration for task {message.task_id}",
             )
+
+        # Feed aux tool results back to LLM for revision if there's context
+        if aux_results and response:
+            aux_context = "\n\n".join(
+                f"=== {name} ===\n{result}" for name, result in aux_results
+            )
+            revision_prompt = f"""You previously used these tools while working:
+
+{aux_context}
+
+Based on this information, continue writing or refining the code. Use write_file for each file."""
+            extra_text, extra_calls = await self.think_with_tools(
+                revision_prompt, [WRITE_FILE_TOOL], project_id=message.project_id,
+                task_id=message.task_id, temperature=0.3,
+            )
+            valid_extra, _ = validate_and_log(
+                extra_calls, [WRITE_FILE_TOOL], agent_name=self.role.value
+            )
+            extra_artifacts = await self._process_write_file_calls(
+                valid_extra, message.project_id, message.task_id
+            )
+            artifacts.extend(extra_artifacts)
+            if extra_artifacts:
+                await WorkspaceManager.commit_workspace(
+                    message.project_id,
+                    f"Follow-up writes for task {message.task_id}",
+                )
 
         # Fall back to regex parsing if no tool calls were made
         if not artifacts and response:
@@ -227,7 +264,7 @@ FEEDBACK:
 
 Address ALL issues mentioned in the feedback. Use the `write_file` tool for each file you need to correct. Only output files that have changed."""
 
-        tool_defs = [WRITE_FILE_TOOL]
+        tool_defs = [WRITE_FILE_TOOL, LIST_FILES_TOOL, READ_FILE_TOOL, INSTALL_PACKAGE_TOOL]
         response, tool_calls = await self.think_with_tools(
             prompt, tool_defs, project_id=message.project_id,
             task_id=message.task_id, temperature=0.3,
@@ -248,7 +285,7 @@ Address ALL issues mentioned in the feedback. Use the `write_file` tool for each
 Original feedback:
 {message.payload.content[:500]}
 
-Please call write_file with corrected arguments."""
+Please call write_file, list_files, read_file, or install_package with corrected arguments."""
             response, tool_calls = await self.think_with_tools(
                 fix_prompt, tool_defs, project_id=message.project_id,
                 task_id=message.task_id, temperature=0.3,
@@ -257,9 +294,34 @@ Please call write_file with corrected arguments."""
                 tool_calls, tool_defs, agent_name=self.role.value
             )
 
+        # Execute auxiliary tool calls
+        aux_results = await self._execute_aux_tools(valid_calls, message.project_id)
+
         artifacts = await self._process_write_file_calls(
             valid_calls, message.project_id, message.task_id
         )
+
+        # Feed aux results back for further refinement if applicable
+        if aux_results and not artifacts and response:
+            aux_context = "\n\n".join(
+                f"=== {name} ===\n{result}" for name, result in aux_results
+            )
+            revision_prompt = f"""You previously used these tools:
+
+{aux_context}
+
+Based on this information, fix the code. Use write_file for each file."""
+            extra_text, extra_calls = await self.think_with_tools(
+                revision_prompt, [WRITE_FILE_TOOL], project_id=message.project_id,
+                task_id=message.task_id, temperature=0.3,
+            )
+            valid_extra, _ = validate_and_log(
+                extra_calls, [WRITE_FILE_TOOL], agent_name=self.role.value
+            )
+            extra_artifacts = await self._process_write_file_calls(
+                valid_extra, message.project_id, message.task_id
+            )
+            artifacts.extend(extra_artifacts)
 
         # Commit changes from tool calls
         if artifacts:
@@ -463,3 +525,116 @@ Provide a clear answer with code examples if needed."""
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(artifact.content, encoding="utf-8")
         logger.info("file_written", path=str(file_path))
+
+    async def _execute_aux_tools(
+        self, tool_calls: list[dict], project_id: str
+    ) -> list[tuple[str, str]]:
+        """Execute auxiliary tool calls (list_files, read_file, install_package).
+
+        Returns a list of (tool_name_with_args, result_string) pairs.
+        """
+        results: list[tuple[str, str]] = []
+        for call in tool_calls:
+            name = call.get("name", "")
+            args = call.get("arguments", {})
+            if name == "list_files":
+                path = args.get("path", ".")
+                result = await self._list_directory(path, project_id)
+                results.append((f"list_files({path!r})", result))
+            elif name == "read_file":
+                path = args.get("path", "")
+                result = await self._read_file_content(path, project_id)
+                results.append((f"read_file({path!r})", result))
+            elif name == "install_package":
+                packages = args.get("packages", [])
+                upgrade = args.get("upgrade", False)
+                result = await self._install_packages(packages, upgrade)
+                results.append((f"install_package({', '.join(packages)})", result))
+        return results
+
+    async def _list_directory(self, path: str, project_id: str) -> str:
+        """List files in a workspace directory."""
+        try:
+            if not project_id or "/" in project_id or "\\" in project_id or ".." in project_id:
+                return f"Invalid project_id: {project_id}"
+            workspace_root = Path(settings.workspace_dir)
+            if not workspace_root.exists():
+                workspace_root = Path.cwd() / "workspace"
+            workspace = (workspace_root / project_id).resolve()
+            target = (workspace / path).resolve()
+            target.relative_to(workspace)
+
+            if not target.exists():
+                return f"Path does not exist: {path}"
+            if not target.is_dir():
+                return f"Not a directory: {path}"
+
+            entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name))
+            lines: list[str] = []
+            for entry in entries:
+                suffix = "/" if entry.is_dir() else ""
+                lines.append(f"  {entry.name}{suffix}")
+            return "\n".join(lines) if lines else f"(empty directory: {path})"
+        except ValueError:
+            return f"Path escapes workspace: {path}"
+        except Exception as exc:
+            logger.warning("list_directory_failed", path=path, error=str(exc))
+            return f"Failed to list {path}: {exc}"
+
+    async def _read_file_content(self, path: str, project_id: str) -> str:
+        """Read a file from the workspace."""
+        try:
+            if not project_id or "/" in project_id or "\\" in project_id or ".." in project_id:
+                return f"Invalid project_id: {project_id}"
+            workspace_root = Path(settings.workspace_dir)
+            if not workspace_root.exists():
+                workspace_root = Path.cwd() / "workspace"
+            workspace = (workspace_root / project_id).resolve()
+            target = (workspace / path).resolve()
+            target.relative_to(workspace)
+
+            if not target.exists():
+                return f"File does not exist: {path}"
+            if not target.is_file():
+                return f"Not a file: {path}"
+
+            content = target.read_text(encoding="utf-8")
+            return content
+        except ValueError:
+            return f"Path escapes workspace: {path}"
+        except Exception as exc:
+            logger.warning("read_file_failed", path=path, error=str(exc))
+            return f"Failed to read {path}: {exc}"
+
+    @staticmethod
+    async def _install_packages(packages: list[str], upgrade: bool = False) -> str:
+        """Install Python packages via pip."""
+        import asyncio
+
+        if not packages:
+            return "No packages specified."
+
+        cmd = ["pip", "install"]
+        if upgrade:
+            cmd.append("--upgrade")
+        cmd.extend(packages)
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            out = stdout.decode("utf-8", errors="replace") if stdout else ""
+            err = stderr.decode("utf-8", errors="replace") if stderr else ""
+            if proc.returncode == 0:
+                return f"Successfully installed: {', '.join(packages)}\n{out.strip()}"
+            return f"Installation failed (exit {proc.returncode}):\n{err.strip()}"
+        except TimeoutError:
+            return f"Package installation timed out after 120s: {', '.join(packages)}"
+        except FileNotFoundError:
+            return "pip not found in this environment."
+        except Exception as exc:
+            logger.warning("install_packages_failed", packages=packages, error=str(exc))
+            return f"Failed to install packages: {exc}"
