@@ -402,6 +402,30 @@ function showTaskModal(task) {
     document.getElementById('taskModalTitle').textContent = task.title;
 
     const body = document.getElementById('taskModalBody');
+
+    // Build HITL controls for review/in-progress tasks
+    let hitlHtml = '';
+    if (task.state === 'review') {
+        hitlHtml = `
+        <div class="hitl-section">
+            <h4 class="hitl-title">👤 Human Review</h4>
+            <textarea id="hitlFeedback" class="hitl-textarea" placeholder="Optional review notes / feedback..."></textarea>
+            <div class="hitl-buttons">
+                <button class="btn-sm btn-success" onclick="approveTask('${task.id}')">✅ Approve</button>
+                <button class="btn-sm btn-danger" onclick="rejectTask('${task.id}')">🔄 Needs Revision</button>
+            </div>
+        </div>`;
+    } else if (task.state === 'in_progress' || task.state === 'assigned') {
+        hitlHtml = `
+        <div class="hitl-section">
+            <h4 class="hitl-title">💬 Inject Feedback</h4>
+            <textarea id="hitlFeedback" class="hitl-textarea" placeholder="Write feedback for the ${task.assigned_to || 'coder'} agent..."></textarea>
+            <div class="hitl-buttons">
+                <button class="btn-sm" onclick="injectFeedback('${task.id}', '${task.assigned_to || 'coder'}', '${task.project_id}')">📤 Send Feedback</button>
+            </div>
+        </div>`;
+    }
+
     body.innerHTML = `
         <div class="task-detail-grid">
             <span class="label">State</span>
@@ -425,6 +449,7 @@ function showTaskModal(task) {
         ${task.deliverable ? `
         <h4 style="margin:0.6rem 0 0.4rem;font-size:0.85rem;">Deliverable</h4>
         <div class="task-description">${escapeHtml(task.deliverable)}</div>` : ''}
+        ${hitlHtml}
     `;
 
     const footer = document.getElementById('taskModalFooter');
@@ -438,6 +463,66 @@ function showTaskModal(task) {
     }
 
     document.getElementById('taskModal').classList.add('open');
+}
+
+// ============================================================
+// HITL: Human-in-the-Loop Actions
+// ============================================================
+
+async function injectFeedback(taskId, agentRole, projectId) {
+    const feedback = document.getElementById('hitlFeedback').value;
+    if (!feedback.trim()) { alert('Please write some feedback first.'); return; }
+
+    try {
+        await apiFetch(`/api/projects/${projectId}/feedback`, {
+            method: 'POST',
+            body: JSON.stringify({
+                task_id: taskId,
+                content: feedback,
+                agent_role: agentRole,
+            }),
+        });
+        document.getElementById('hitlFeedback').value = '';
+        alert('Feedback sent to the agent.');
+    } catch (err) {
+        alert(`Failed to send feedback: ${err.message}`);
+    }
+}
+
+async function approveTask(taskId) {
+    const feedback = document.getElementById('hitlFeedback')?.value || '';
+    try {
+        const response = await apiFetch(`/api/projects/${currentProjectId}/review`, {
+            method: 'POST',
+            body: JSON.stringify({
+                task_id: taskId,
+                verdict: 'approved',
+                summary: feedback || 'Human approved',
+            }),
+        });
+        closeModal('taskModal');
+        loadProjectDetail(currentProjectId);
+    } catch (err) {
+        alert(`Failed to approve: ${err.message}`);
+    }
+}
+
+async function rejectTask(taskId) {
+    const feedback = document.getElementById('hitlFeedback')?.value || 'Please revise based on human review.';
+    try {
+        const response = await apiFetch(`/api/projects/${currentProjectId}/review`, {
+            method: 'POST',
+            body: JSON.stringify({
+                task_id: taskId,
+                verdict: 'needs_revision',
+                summary: feedback,
+            }),
+        });
+        closeModal('taskModal');
+        loadProjectDetail(currentProjectId);
+    } catch (err) {
+        alert(`Failed to reject: ${err.message}`);
+    }
 }
 
 // ============================================================
