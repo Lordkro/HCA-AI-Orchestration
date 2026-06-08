@@ -6,6 +6,7 @@ real project data.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from pathlib import Path
@@ -13,6 +14,10 @@ from pathlib import Path
 import pytest
 
 from hca.orchestrator.workspace_manager import WorkspaceManager, _get_dir_size
+
+_HAVE_GIT: bool = (
+    __import__("shutil").which("git") is not None
+)
 
 
 class TestGetDirSize:
@@ -131,3 +136,191 @@ class TestGetWorkspaceStats:
         assert stats["total_count"] == 2
         assert stats["total_size_mb"] >= 0
         assert stats["avg_size_mb"] >= 0
+
+
+# ============================================================
+# Git Integration Tests
+# ============================================================
+
+
+pytestmark = pytest.mark.skipif(not _HAVE_GIT, reason="git not available")
+
+
+class TestGitInit:
+    """Tests for init_project_repo."""
+
+    @pytest.mark.asyncio
+    async def test_init_new_repo(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        result = await WorkspaceManager.init_project_repo("proj-1")
+        assert result is True
+        assert (tmp_path / "proj-1" / ".git").exists()
+
+    @pytest.mark.asyncio
+    async def test_init_twice_is_idempotent(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        assert await WorkspaceManager.init_project_repo("proj-1") is True
+        assert await WorkspaceManager.init_project_repo("proj-1") is False
+
+    @pytest.mark.asyncio
+    async def test_init_creates_gitignore(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        await WorkspaceManager.init_project_repo("proj-1")
+        ws = tmp_path / "proj-1"
+        gitignore = ws / ".gitignore"
+        assert gitignore.exists()
+        content = gitignore.read_text()
+        assert "__pycache__" in content
+        assert ".env" in content
+
+
+class TestGitCommit:
+    """Tests for commit_workspace."""
+
+    @pytest.mark.asyncio
+    async def test_commit_with_changes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        await WorkspaceManager.init_project_repo("proj-1")
+        ws = tmp_path / "proj-1"
+        (ws / "test.txt").write_text("hello")
+        result = await WorkspaceManager.commit_workspace("proj-1", "initial commit")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_commit_no_changes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        await WorkspaceManager.init_project_repo("proj-1")
+        ws = tmp_path / "proj-1"
+        (ws / "placeholder").write_text("init")
+        await WorkspaceManager.commit_workspace("proj-1", "init")  # first commit
+        result = await WorkspaceManager.commit_workspace("proj-1", "no-op")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_commit_with_tag(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        await WorkspaceManager.init_project_repo("proj-1")
+        ws = tmp_path / "proj-1"
+        (ws / "app.py").write_text("print('hello')")
+        result = await WorkspaceManager.commit_workspace("proj-1", "with tag", tag="task-123")
+        assert result is True
+        # Verify tag exists
+        proc = await asyncio.create_subprocess_exec(
+            "git", "tag", "-l", "task-123",
+            stdout=asyncio.subprocess.PIPE,
+            cwd=str(ws),
+        )
+        stdout, _ = await proc.communicate()
+        assert stdout.decode().strip() == "task-123"
+
+    @pytest.mark.asyncio
+    async def test_commit_auto_inits_repo(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        ws = tmp_path / "proj-1"
+        ws.mkdir(parents=True)
+        (ws / "data.txt").write_text("content")
+        # No prior init — commit should auto-init
+        result = await WorkspaceManager.commit_workspace("proj-1", "auto init commit")
+        assert result is True
+        assert (ws / ".git").exists()
+
+
+class TestGitLog:
+    """Tests for get_workspace_log."""
+
+    @pytest.mark.asyncio
+    async def test_log_empty_no_repo(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        log = await WorkspaceManager.get_workspace_log("nonexistent")
+        assert log == []
+
+    @pytest.mark.asyncio
+    async def test_log_no_commits(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        await WorkspaceManager.init_project_repo("proj-1")
+        log = await WorkspaceManager.get_workspace_log("proj-1")
+        assert log == []
+
+    @pytest.mark.asyncio
+    async def test_log_after_commits(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        await WorkspaceManager.init_project_repo("proj-1")
+        ws = tmp_path / "proj-1"
+        (ws / "a.txt").write_text("a")
+        await WorkspaceManager.commit_workspace("proj-1", "first")
+        (ws / "b.txt").write_text("b")
+        await WorkspaceManager.commit_workspace("proj-1", "second")
+        log = await WorkspaceManager.get_workspace_log("proj-1", n=5)
+        assert len(log) == 2
+        assert log[0]["message"] == "second"
+        assert log[1]["message"] == "first"
+        assert len(log[0]["hash"]) == 12
+
+    @pytest.mark.asyncio
+    async def test_log_includes_tags(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        await WorkspaceManager.init_project_repo("proj-1")
+        ws = tmp_path / "proj-1"
+        (ws / "main.py").write_text("code")
+        await WorkspaceManager.commit_workspace("proj-1", "tagged", tag="t-42")
+        log = await WorkspaceManager.get_workspace_log("proj-1")
+        assert len(log) == 1
+        assert "t-42" in log[0]["tags"]
+
+
+class TestGitDiff:
+    """Tests for get_workspace_diff."""
+
+    @pytest.mark.asyncio
+    async def test_diff_no_repo(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        diff = await WorkspaceManager.get_workspace_diff("nonexistent")
+        assert diff == ""
+
+    @pytest.mark.asyncio
+    async def test_diff_no_changes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        await WorkspaceManager.init_project_repo("proj-1")
+        ws = tmp_path / "proj-1"
+        (ws / "f.txt").write_text("content")
+        await WorkspaceManager.commit_workspace("proj-1", "init")
+        diff = await WorkspaceManager.get_workspace_diff("proj-1")
+        assert diff == ""
+
+    @pytest.mark.asyncio
+    async def test_diff_with_uncommitted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        await WorkspaceManager.init_project_repo("proj-1")
+        ws = tmp_path / "proj-1"
+        (ws / "f.txt").write_text("content")
+        await WorkspaceManager.commit_workspace("proj-1", "init")
+        (ws / "f.txt").write_text("modified")
+        diff = await WorkspaceManager.get_workspace_diff("proj-1")
+        assert "modified" in diff or "+modified" in diff
+
+
+class TestGitFileList:
+    """Tests for get_workspace_file_list."""
+
+    @pytest.mark.asyncio
+    async def test_file_list_no_workspace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        files = await WorkspaceManager.get_workspace_file_list("nonexistent")
+        assert files == []
+
+    @pytest.mark.asyncio
+    async def test_file_list_with_files(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        ws = tmp_path / "proj-1"
+        ws.mkdir(parents=True)
+        (ws / "main.py").write_text("code")
+        (ws / "README.md").write_text("docs")
+        sub = ws / "lib"
+        sub.mkdir()
+        (sub / "util.py").write_text("helper")
+        files = await WorkspaceManager.get_workspace_file_list("proj-1")
+        paths = [f["path"] for f in files]
+        assert "main.py" in paths
+        assert "README.md" in paths
+        assert "lib/util.py" in paths
+        assert all(f["size"] > 0 for f in files)

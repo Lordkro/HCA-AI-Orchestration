@@ -14,6 +14,7 @@ from hca.core.models import (
     TaskState,
 )
 from hca.core.ollama_client import OllamaClient
+from hca.orchestrator.workspace_manager import WorkspaceManager
 
 logger = structlog.get_logger()
 
@@ -104,6 +105,10 @@ Do NOT write the actual implementation code — only the specification."""
             prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.5
         )
 
+        await self._save_spec_to_workspace(
+            message.project_id, message.task_id, response
+        )
+
         return self.create_message(
             recipient=AgentRole.PM,
             msg_type=MessageType.DELIVERABLE,
@@ -112,6 +117,24 @@ Do NOT write the actual implementation code — only the specification."""
             content=response,
             metadata={"artifact_type": "specification"},
         )
+
+    async def _save_spec_to_workspace(
+        self, project_id: str, task_id: str, content: str
+    ) -> None:
+        """Write the specification to the project workspace and commit."""
+        try:
+            ws_path = WorkspaceManager._workspace_path(project_id)
+            ws_path.mkdir(parents=True, exist_ok=True)
+            spec_file = ws_path / "SPECIFICATION.md"
+            spec_file.write_text(content)
+            await WorkspaceManager.init_project_repo(project_id)
+            await WorkspaceManager.commit_workspace(
+                project_id,
+                f"Specification for task {task_id}",
+                tag=task_id,
+            )
+        except Exception as exc:
+            logger.warning("spec_workspace_write_failed", error=str(exc))
 
     async def _handle_feedback(self, message: AgentMessage) -> AgentMessage | None:
         """Revise specifications based on feedback."""
@@ -125,6 +148,10 @@ Please revise the specification to address all feedback points. Output the compl
 
         response = await self.think(
             prompt, project_id=message.project_id, task_id=message.task_id, temperature=0.5
+        )
+
+        await self._save_spec_to_workspace(
+            message.project_id, message.task_id, response
         )
 
         return self.create_message(

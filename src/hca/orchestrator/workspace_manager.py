@@ -4,7 +4,7 @@ Handles:
 - Retention policies (max age, max count)
 - Cleanup of old/orphaned workspaces
 - Metrics on workspace usage
-- Git integration per project workspace
+- Git integration per project workspace (init, commit, log, diff, tag, .gitignore)
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ class WorkspaceManager:
         """Initialise a git repository in the project workspace.
 
         Safe to call multiple times — skips if .git already exists.
+        Writes a sensible .gitignore to exclude caches and env files.
         Returns True if a new repo was initialised.
         """
         ws = WorkspaceManager._workspace_path(project_id)
@@ -73,6 +74,24 @@ class WorkspaceManager:
                 cwd=str(ws),
             )
 
+            # Write sensible .gitignore for generated/cache files
+            gitignore = ws / ".gitignore"
+            if not gitignore.exists():
+                gitignore.write_text(
+                    "# HCA workspace — generated files to exclude\n"
+                    "__pycache__/\n"
+                    "*.pyc\n"
+                    "*.pyo\n"
+                    "*.egg-info/\n"
+                    ".env\n"
+                    ".venv/\n"
+                    "venv/\n"
+                    "node_modules/\n"
+                    ".DS_Store\n"
+                    "*.log\n"
+                    ".data/\n"
+                )
+
             logger.info("git_repo_initialised", project_id=project_id)
             return True
         except FileNotFoundError:
@@ -80,8 +99,10 @@ class WorkspaceManager:
             return False
 
     @staticmethod
-    async def commit_workspace(project_id: str, message: str) -> bool:
+    async def commit_workspace(project_id: str, message: str, tag: str = "") -> bool:
         """Stage all changes and commit to the project git repo.
+
+        Optionally tags the commit with a lightweight tag (e.g. a task ID).
 
         Returns True if a commit was made (has changes), False otherwise.
         """
@@ -113,7 +134,6 @@ class WorkspaceManager:
             )
             rc_diff = await diff_proc.wait()
             if rc_diff == 0:
-                # No changes to commit
                 return False
 
             # git commit
@@ -128,7 +148,17 @@ class WorkspaceManager:
                 logger.warning("git_commit_failed", project_id=project_id, returncode=rc_commit)
                 return False
 
-            logger.info("git_commit_created", project_id=project_id, message=message)
+            # Optional lightweight tag
+            if tag:
+                tag_proc = await asyncio.create_subprocess_exec(
+                    "git", "tag", "-f", tag,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    cwd=str(ws),
+                )
+                await tag_proc.wait()
+
+            logger.info("git_commit_created", project_id=project_id, message=message, tag=tag or None)
             return True
         except FileNotFoundError:
             logger.warning("git_not_available", project_id=project_id)
@@ -155,6 +185,77 @@ class WorkspaceManager:
             return stdout.decode("utf-8", errors="replace").strip()
         except FileNotFoundError:
             return ""
+
+    @staticmethod
+    async def get_workspace_log(project_id: str, n: int = 10) -> list[dict[str, str]]:
+        """Get the recent commit log for a project workspace.
+
+        Returns a list of dicts with ``hash``, ``author``, ``date``, ``message``, ``tags``.
+        Empty list if git is unavailable or the repo has no commits.
+        """
+        ws = WorkspaceManager._workspace_path(project_id)
+        if not (ws / ".git").exists():
+            return []
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "log", f"-{n}",
+                "--format=%x00%H%n%an%n%aI%n%s%n%D",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=str(ws),
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode != 0:
+                return []
+
+            raw = stdout.decode("utf-8", errors="replace").lstrip("\x00")
+            if not raw.strip():
+                return []
+
+            entries: list[dict[str, str]] = []
+            for block in raw.split("\x00"):
+                block = block.strip()
+                if not block:
+                    continue
+                lines = block.splitlines()
+                # Expect 4-5 lines: hash, author, date, msg [, tags]
+                if len(lines) < 4:
+                    continue
+                tags = lines[4].strip() if len(lines) > 4 else ""
+                entries.append({
+                    "hash": lines[0][:12],
+                    "author": lines[1],
+                    "date": lines[2],
+                    "message": lines[3],
+                    "tags": tags,
+                })
+            return entries
+        except FileNotFoundError:
+            return []
+
+    @staticmethod
+    async def get_workspace_file_list(project_id: str) -> list[dict[str, object]]:
+        """List files in the workspace with size and modification time.
+
+        Returns a list of dicts with ``path``, ``size``, ``mtime``.
+        Empty list if workspace does not exist.
+        """
+        ws = WorkspaceManager._workspace_path(project_id)
+        if not ws.exists():
+            return []
+
+        files: list[dict[str, object]] = []
+        for entry in sorted(ws.rglob("*"), key=lambda p: str(p)):
+            if not entry.is_file() or entry.name.startswith("."):
+                continue
+            stat = entry.stat()
+            files.append({
+                "path": str(entry.relative_to(ws)),
+                "size": stat.st_size,
+                "mtime": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+            })
+        return files
 
     # ---------------------------------------------------------------
     # Cleanup
