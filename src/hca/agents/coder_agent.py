@@ -142,6 +142,7 @@ Please call write_file, list_files, read_file, or install_package with corrected
             await WorkspaceManager.commit_workspace(
                 message.project_id,
                 f"Coding iteration for task {message.task_id}",
+                tag=message.task_id,
             )
 
         # Feed aux tool results back to LLM for revision if there's context
@@ -169,6 +170,7 @@ Based on this information, continue writing or refining the code. Use write_file
                 await WorkspaceManager.commit_workspace(
                     message.project_id,
                     f"Follow-up writes for task {message.task_id}",
+                    tag=message.task_id,
                 )
 
         # Fall back to regex parsing if no tool calls were made
@@ -328,6 +330,7 @@ Based on this information, fix the code. Use write_file for each file."""
             await WorkspaceManager.commit_workspace(
                 message.project_id,
                 f"Revision for task {message.task_id}",
+                tag=message.task_id,
             )
 
         # Fall back to regex parsing if no tool calls were made
