@@ -114,6 +114,101 @@ SUBMIT_REVIEW_TOOL: dict = {
 }
 
 
+WEB_SEARCH_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": "Search the web for information on a given query, returning relevant snippets and links. Use this to investigate technologies, find documentation, and gather context.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query (use keywords, not full sentences)",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+FETCH_PAGE_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "fetch_page",
+        "description": "Fetch and read the full content of a webpage or documentation URL. Use this after web_search to get detailed information from a specific link.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Complete URL to fetch (must include scheme, e.g. https://example.com)",
+                },
+            },
+            "required": ["url"],
+        },
+    },
+}
+
+INSTALL_PACKAGE_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "install_package",
+        "description": "Install one or more Python packages via pip. Use this when the project requires external dependencies.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "packages": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Package names (optionally with version specifiers, e.g. requests>=2.31.0)",
+                },
+                "upgrade": {
+                    "type": "boolean",
+                    "description": "Whether to upgrade existing packages (--upgrade flag)",
+                },
+            },
+            "required": ["packages"],
+        },
+    },
+}
+
+LIST_FILES_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "list_files",
+        "description": "List files and directories in a workspace path. Use this to explore the project structure or verify file locations.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Directory path relative to project root (e.g. . or src or src/hca)",
+                },
+            },
+            "required": ["path"],
+        },
+    },
+}
+
+READ_FILE_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "read_file",
+        "description": "Read the full contents of a file in the project workspace. Use this to inspect existing code during revisions.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path relative to project root (e.g. src/hca/main.py)",
+                },
+            },
+            "required": ["path"],
+        },
+    },
+}
+
 # ======================================================================
 # Tool Call Validation
 # ======================================================================

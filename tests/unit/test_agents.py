@@ -902,3 +902,219 @@ class TestBaseTransitionHelper:
         agent = ResearchAgent(bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm)
         ok = await agent._transition_task("", TaskState.ASSIGNED)
         assert ok is False
+
+
+# ============================================================
+# Enhanced tool calling (Issue #34)
+# ============================================================
+
+
+class TestResearchToolCalling:
+    """Tests for Research agent's web_search and fetch_page tool integration."""
+
+    async def test_research_task_uses_tools(
+        self, db: Database, mock_bus: MockMessageBus, mock_ollama: MockOllamaClient
+    ) -> None:
+        """Research agent should call think_with_tools with web search tools."""
+        project = await _setup_project(db)
+        tm = TaskManager(db=db, bus=mock_bus)
+        task = await tm.create_task(
+            project_id=project.id,
+            title="Research task",
+            description="Research something",
+            assigned_to=AgentRole.RESEARCH,
+        )
+        await tm.transition(task.id, TaskState.ASSIGNED)
+
+        agent = ResearchAgent(bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm)
+        msg = make_message(
+            sender=AgentRole.PM,
+            recipient=AgentRole.RESEARCH,
+            msg_type=MessageType.TASK_ASSIGNMENT,
+            project_id=project.id,
+            task_id=task.id,
+            content="Research Python async",
+        )
+        result = await agent.process_message(msg)
+
+        assert result is not None
+        assert result.recipient == AgentRole.PM
+        assert result.type == MessageType.DELIVERABLE
+        # Should have called chat_with_tools (check captured calls)
+        tool_calls_log = [
+            c for c in mock_ollama.chat_calls if "tools" in c and c["tools"]
+        ]
+        assert len(tool_calls_log) >= 1
+        # Verify tools include web_search
+        tool_names = [
+            t["function"]["name"] for t in tool_calls_log[0]["tools"]
+        ]
+        assert "web_search" in tool_names
+        assert "fetch_page" in tool_names
+
+    async def test_research_executes_tool_calls(
+        self, db: Database, mock_bus: MockMessageBus, mock_ollama: MockOllamaClient
+    ) -> None:
+        """When the LLM returns tool calls, the agent should execute them."""
+        project = await _setup_project(db)
+        tm = TaskManager(db=db, bus=mock_bus)
+        task = await tm.create_task(
+            project_id=project.id,
+            title="Research task",
+            description="Research something",
+            assigned_to=AgentRole.RESEARCH,
+        )
+        await tm.transition(task.id, TaskState.ASSIGNED)
+
+        # First call returns a web_search tool call; synthesis call returns text
+        mock_ollama.chat_with_tools = AsyncMock(
+            side_effect=[
+                ("", [{"name": "web_search", "arguments": {"query": "python async"}}]),
+                ("Synthesis result.", []),
+            ]
+        )
+
+        agent = ResearchAgent(bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm)
+        msg = make_message(
+            sender=AgentRole.PM,
+            recipient=AgentRole.RESEARCH,
+            msg_type=MessageType.TASK_ASSIGNMENT,
+            project_id=project.id,
+            task_id=task.id,
+            content="Research Python async",
+        )
+
+        # Patch _web_search to avoid real HTTP calls
+        with patch.object(agent, "_web_search", AsyncMock(return_value="Mock search results")):
+            result = await agent.process_message(msg)
+
+        assert result is not None
+        assert result.payload.content != ""
+
+    async def test_research_invalid_tool_triggers_retry(
+        self, db: Database, mock_bus: MockMessageBus, mock_ollama: MockOllamaClient
+    ) -> None:
+        """Invalid tool calls should trigger a validation retry."""
+        project = await _setup_project(db)
+        tm = TaskManager(db=db, bus=mock_bus)
+        task = await tm.create_task(
+            project_id=project.id,
+            title="Research task",
+            description="Research something",
+            assigned_to=AgentRole.RESEARCH,
+        )
+        await tm.transition(task.id, TaskState.ASSIGNED)
+
+        # First call returns invalid tool call (missing query), second is valid
+        mock_ollama.chat_with_tools = AsyncMock(
+            side_effect=[
+                ("", [{"name": "web_search", "arguments": {}}]),
+                ("", [{"name": "web_search", "arguments": {"query": "python async"}}]),
+            ]
+        )
+
+        agent = ResearchAgent(bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm)
+        msg = make_message(
+            sender=AgentRole.PM,
+            recipient=AgentRole.RESEARCH,
+            msg_type=MessageType.TASK_ASSIGNMENT,
+            project_id=project.id,
+            task_id=task.id,
+            content="Research Python async",
+        )
+
+        with patch.object(agent, "_web_search", AsyncMock(return_value="Mock search results")):
+            result = await agent.process_message(msg)
+
+        assert result is not None
+        # Should have made at least 2 LLM calls (retry)
+        assert mock_ollama.chat_with_tools.call_count >= 2
+
+
+class TestCoderAuxTools:
+    """Tests for Coder agent's list_files, read_file, install_package tools."""
+
+    async def test_coder_task_uses_aux_tools(
+        self, db: Database, mock_bus: MockMessageBus, mock_ollama: MockOllamaClient
+    ) -> None:
+        """Coder agent should include aux tools in tool_defs."""
+        project = await _setup_project(db)
+        tm = TaskManager(db=db, bus=mock_bus)
+        task = await tm.create_task(
+            project_id=project.id,
+            title="Code task",
+            description="Write code",
+            assigned_to=AgentRole.CODER,
+        )
+        await tm.transition(task.id, TaskState.ASSIGNED)
+
+        agent = CoderAgent(bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm)
+        msg = make_message(
+            sender=AgentRole.PM,
+            recipient=AgentRole.CODER,
+            msg_type=MessageType.TASK_ASSIGNMENT,
+            project_id=project.id,
+            task_id=task.id,
+            content="Implement auth",
+        )
+        result = await agent.process_message(msg)
+
+        assert result is not None
+        tool_calls_log = [
+            c for c in mock_ollama.chat_calls if "tools" in c and c["tools"]
+        ]
+        assert len(tool_calls_log) >= 1
+        tool_names = [
+            t["function"]["name"] for t in tool_calls_log[0]["tools"]
+        ]
+        assert "list_files" in tool_names
+        assert "read_file" in tool_names
+        assert "install_package" in tool_names
+        assert "write_file" in tool_names
+
+    async def test_coder_executes_list_files(
+        self, db: Database, mock_bus: MockMessageBus, mock_ollama: MockOllamaClient
+    ) -> None:
+        """Coder should execute list_files when the LLM calls it."""
+        project = await _setup_project(db)
+        tm = TaskManager(db=db, bus=mock_bus)
+        task = await tm.create_task(
+            project_id=project.id,
+            title="Code task",
+            description="Write code",
+            assigned_to=AgentRole.CODER,
+        )
+        await tm.transition(task.id, TaskState.ASSIGNED)
+
+        mock_ollama.chat_with_tools = AsyncMock(
+            side_effect=[
+                ("Listing files...", [{"name": "list_files", "arguments": {"path": "."}}]),
+                ("Final code result.", []),
+            ]
+        )
+
+        agent = CoderAgent(bus=mock_bus, ollama=mock_ollama, db=db, task_manager=tm)
+        msg = make_message(
+            sender=AgentRole.PM,
+            recipient=AgentRole.CODER,
+            msg_type=MessageType.TASK_ASSIGNMENT,
+            project_id=project.id,
+            task_id=task.id,
+            content="Implement auth",
+        )
+
+        with patch.object(agent, "_list_directory", AsyncMock(return_value="file1.py\nfile2.py")):
+            result = await agent.process_message(msg)
+
+        assert result is not None
+        assert result.payload.content != ""
+
+    async def test_coder_installs_packages(
+        self, db: Database, mock_bus: MockMessageBus, mock_ollama: MockOllamaClient
+    ) -> None:
+        """Coder should install packages when the LLM calls install_package."""
+        agent = CoderAgent(bus=mock_bus, ollama=mock_ollama, db=db)
+
+        with patch.object(agent, "_install_packages", AsyncMock(return_value="Successfully installed")):
+            result = await agent._install_packages(["requests", "pydantic"])
+            assert "Successfully installed" in result
