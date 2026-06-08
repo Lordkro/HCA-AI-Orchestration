@@ -27,74 +27,68 @@ An AI agent team that takes your product ideas and builds them into working appl
 - At least 8 GB system RAM (16 GB+ recommended)
 - **No GPU required** — CPU mode works on any system; NVIDIA and AMD GPU profiles available
 
-### 1. Choose your hardware profile
-
-Pick the profile that matches your setup:
-
-| Profile | Command | Requirements |
-|---------|---------|--------------|
-| **CPU** (default) | `docker compose up` | No GPU needed — slowest but most compatible |
-| **NVIDIA GPU** | `docker compose --profile nvidia up` | [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
-| **AMD ROCm** | `docker compose --profile rocm up` | AMD GPU with ROCm driver, `/dev/kfd` + `/dev/dri` |
-
-For NVIDIA, first install the container toolkit:
-```bash
-# Ubuntu / Debian
-sudo apt install nvidia-container-toolkit && sudo systemctl restart docker
-# Validate
-docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
-```
-
-### 2. Pick the right model for your VRAM
-
-| VRAM | Recommended default | Recommended coder | Models |
-|------|-------------------|-------------------|--------|
-| ≥24 GB | `qwen3:14b` | `qwen2.5-coder:14b` | ~9 GB each |
-| 12-24 GB | `qwen3:8b` | `qwen2.5-coder:7b` | ~5-6 GB each |
-| 8-12 GB | `llama3.2:3b` | `qwen2.5-coder:3b` | ~2-3 GB each |
-| 6-8 GB | `phi-4:latest` | `phi-4:latest` | ~2.5 GB |
-| <6 GB | `llama3.2:1b` | `qwen2.5-coder:1.5b` | <1 GB each |
-
-Edit `.env` to set `OLLAMA_DEFAULT_MODEL` and `OLLAMA_CODER_MODEL` for your VRAM tier.
-
-### 3. Clone and configure
+### One-command setup (recommended)
 
 ```bash
 git clone <repo-url> && cd HCA-Orchestration
+bash setup.sh
+```
+
+This auto-detects your GPU, copies `.env`, starts services, and pulls the recommended models.
+For NVIDIA GPUs, install the [container toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) first.
+
+**Options:**
+
+| Flag | Purpose |
+|------|---------|
+| `--profile nvidia` | Force NVIDIA profile (skip auto-detect) |
+| `--profile rocm` | Force AMD ROCm profile |
+| `--models "llama3.2:3b qwen2.5-coder:3b"` | Pull different models |
+| `--skip-pull` | Skip model downloading |
+
+### Manual setup
+
+<details>
+<summary>Click to expand manual steps</summary>
+
+#### 1. Choose your hardware profile
+
+| Profile | Command | Requirements |
+|---------|---------|--------------|
+| **CPU** (default) | `docker compose up` | No GPU needed |
+| **NVIDIA GPU** | `docker compose --profile nvidia up` | [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
+| **AMD ROCm** | `docker compose --profile rocm up` | AMD GPU with ROCm driver |
+
+#### 2. Pick the right model for your VRAM
+
+| VRAM | Recommended default | Recommended coder |
+|------|-------------------|-------------------|
+| ≥24 GB | `qwen3:14b` | `qwen2.5-coder:14b` |
+| 12-24 GB | `qwen3:8b` | `qwen2.5-coder:7b` |
+| 8-12 GB | `llama3.2:3b` | `qwen2.5-coder:3b` |
+| 6-8 GB | `phi-4:latest` | `phi-4:latest` |
+| <6 GB | `llama3.2:1b` | `qwen2.5-coder:1.5b` |
+
+#### 3. Configure
+
+```bash
 cp .env.example .env
-# Edit .env for your hardware profile (models, GPU)
+# Edit OLLAMA_DEFAULT_MODEL and OLLAMA_CODER_MODEL for your VRAM
 ```
 
-### 4. Pull LLM models (first time only)
+#### 4. Start and pull models
 
 ```bash
-docker compose --profile setup run --rm model-puller
+docker compose up -d ollama
+docker compose exec ollama ollama pull qwen3:14b
+docker compose exec ollama ollama pull qwen2.5-coder:14b
+docker compose up -d
 ```
 
-The puller fetches the models listed in `OLLAMA_MODELS_TO_PULL` (default: `qwen3:14b qwen2.5-coder:14b`).
-Each model is 1-9 GB depending on size.
+#### 5. Open dashboard
 
-To pull only specific models instead:
-```bash
-OLLAMA_MODELS_TO_PULL="llama3.2:3b qwen2.5-coder:3b" docker compose --profile setup run --rm model-puller
-```
-
-### 5. Start the system
-
-```bash
-# CPU
-docker compose up
-
-# NVIDIA
-docker compose --profile nvidia up
-
-# AMD ROCm
-docker compose --profile rocm up
-```
-
-### 6. Open the dashboard
-
-Navigate to [http://localhost:8080](http://localhost:8080) and submit your first product idea!
+Navigate to [http://localhost:8080](http://localhost:8080).
+</details>
 
 ## 📚 Documentation
 
