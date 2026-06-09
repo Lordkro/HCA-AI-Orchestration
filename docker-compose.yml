@@ -96,7 +96,7 @@ services:
   # Apple Silicon (Metal) – activates via --profile metal
   # --------------------------------------------------------
   ollama-metal:
-    image: ${OLLAMA_IMAGE_METAL:-ollama/ollama}:${OLLAMA_TAG_METAL:-latest}
+    image: ${OLLAMA_IMAGE:-ollama/ollama}:${OLLAMA_TAG:-latest}
     container_name: hca-ollama
     init: true
     restart: unless-stopped
