@@ -275,7 +275,7 @@ class TestGitPush:
     async def test_push_no_repo(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
         result = await WorkspaceManager.push_to_github(
-            "nonexistent", "https://github.com/owner/repo", token="fake"
+            "nonexistent", "https://github.com/owner/repo", token="fake"  # noqa: S106
         )
         assert result["success"] is False
         assert "No git repository" in result["message"]
@@ -317,7 +317,7 @@ class TestGitPush:
         await proc.wait()
 
         result = await WorkspaceManager.push_to_github(
-            "proj-1", str(bare), token="irrelevant",
+            "proj-1", str(bare), token="irrelevant",  # noqa: S106
         )
         assert result["success"] is True, result["message"]
         # Verify the commit is reachable from the bare repo
