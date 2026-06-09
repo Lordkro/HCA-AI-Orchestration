@@ -140,6 +140,9 @@ class Settings(BaseSettings):
     workspace_retention_days: int = 7  # Clean up workspaces older than 7 days
     workspace_max_count: int = 100  # Keep only the 100 most recent workspaces
 
+    # --- GitHub Integration ---
+    github_token: str = ""  # Personal access token for pushing to GitHub repos
+
     # --- Model Puller ---
     ollama_models_to_pull: str = "qwen3:14b qwen2.5-coder:14b"
 

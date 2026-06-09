@@ -235,6 +235,124 @@ class WorkspaceManager:
             return []
 
     @staticmethod
+    async def _get_current_branch(ws: Path) -> str:
+        """Return the current branch name for the repo at *ws*."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "rev-parse", "--abbrev-ref", "HEAD",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=str(ws),
+            )
+            stdout, _ = await proc.communicate()
+            branch = stdout.decode("utf-8", errors="replace").strip()
+            return branch if branch else "main"
+        except Exception:
+            return "main"
+
+    @staticmethod
+    async def push_to_github(
+        project_id: str,
+        repo_url: str,
+        token: str | None = None,
+        remote_name: str = "origin",
+        branch: str | None = None,
+    ) -> dict:
+        """Push the project workspace git repo to a GitHub remote.
+
+        Args:
+            project_id: The project workspace identifier.
+            repo_url: The GitHub repository URL (e.g. ``https://github.com/owner/repo``).
+            token: GitHub personal access token. Falls back to ``settings.github_token``.
+            remote_name: Git remote name (default ``origin``).
+            branch: Branch to push (defaults to current branch).
+
+        Returns:
+            A dict with keys ``success`` (bool), ``message`` (str),
+            and optionally ``output`` (str) on success.
+        """
+        ws = WorkspaceManager._workspace_path(project_id)
+        git_dir = ws / ".git"
+        if not git_dir.exists():
+            return {"success": False, "message": "No git repository in workspace"}
+
+        resolved_token = token or settings.github_token
+        if not resolved_token:
+            return {"success": False, "message": "No GitHub token provided — set GITHUB_TOKEN or pass token"}
+
+        resolved_branch = branch or await WorkspaceManager._get_current_branch(ws)
+
+        # Ensure repo_url ends with .git
+        repo_url = repo_url.rstrip("/")
+        if not repo_url.endswith(".git"):
+            repo_url += ".git"
+
+        # Embed token into URL for authentication
+        auth_url = repo_url.replace("https://", f"https://{resolved_token}@")
+
+        try:
+            # Check if remote already exists
+            remote_proc = await asyncio.create_subprocess_exec(
+                "git", "remote", "get-url", remote_name,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(ws),
+            )
+            _, remote_stderr = await remote_proc.communicate()
+
+            if remote_proc.returncode == 0:
+                # Remote exists — update URL
+                await asyncio.create_subprocess_exec(
+                    "git", "remote", "set-url", remote_name, auth_url,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    cwd=str(ws),
+                )
+            else:
+                # Remote does not exist — add it
+                await asyncio.create_subprocess_exec(
+                    "git", "remote", "add", remote_name, auth_url,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    cwd=str(ws),
+                )
+
+            # Push to remote
+            push_proc = await asyncio.create_subprocess_exec(
+                "git", "push", "-u", remote_name, resolved_branch,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(ws),
+            )
+            stdout, stderr = await push_proc.communicate()
+
+            if push_proc.returncode != 0:
+                err_msg = stderr.decode("utf-8", errors="replace").strip()
+                logger.warning(
+                    "git_push_failed",
+                    project_id=project_id,
+                    remote=repo_url,
+                    error=err_msg,
+                )
+                return {"success": False, "message": f"Push failed: {err_msg}"}
+
+            output = stdout.decode("utf-8", errors="replace").strip()
+            logger.info(
+                "git_push_success",
+                project_id=project_id,
+                remote=repo_url,
+                branch=resolved_branch,
+            )
+            return {"success": True, "message": f"Pushed to {repo_url}", "output": output}
+
+        except FileNotFoundError:
+            logger.warning("git_not_available", project_id=project_id)
+            return {"success": False, "message": "git not available on this system"}
+        except Exception as exc:
+            logger.error("git_push_exception", project_id=project_id, error=str(exc))
+            return {"success": False, "message": f"Unexpected error: {exc}"}
+
+    @staticmethod
     async def get_workspace_file_list(project_id: str) -> list[dict[str, object]]:
         """List files in the workspace with size and modification time.
 

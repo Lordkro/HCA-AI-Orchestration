@@ -268,6 +268,69 @@ class TestGitLog:
         assert "t-42" in log[0]["tags"]
 
 
+class TestGitPush:
+    """Tests for push_to_github."""
+
+    @pytest.mark.asyncio
+    async def test_push_no_repo(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        result = await WorkspaceManager.push_to_github(
+            "nonexistent", "https://github.com/owner/repo", token="fake"
+        )
+        assert result["success"] is False
+        assert "No git repository" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_push_no_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.github_token", "")
+        ws = tmp_path / "proj-1"
+        ws.mkdir(parents=True)
+        await WorkspaceManager.init_project_repo("proj-1")
+        (ws / "f.txt").write_text("data")
+        await WorkspaceManager.commit_workspace("proj-1", "init")
+        result = await WorkspaceManager.push_to_github(
+            "proj-1", "https://github.com/owner/repo", token=None
+        )
+        assert result["success"] is False
+        assert "No GitHub token" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_push_sets_remote_and_pushes(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Use a local bare repo as a push target to verify end-to-end."""
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.workspace_dir", str(tmp_path))
+        monkeypatch.setattr("hca.orchestrator.workspace_manager.settings.github_token", "test-token")
+
+        ws = tmp_path / "proj-1"
+        ws.mkdir(parents=True)
+        await WorkspaceManager.init_project_repo("proj-1")
+        (ws / "f.txt").write_text("data")
+        await WorkspaceManager.commit_workspace("proj-1", "init")
+
+        # Create local bare repo as push target
+        bare = tmp_path / "target.git"
+        proc = await asyncio.create_subprocess_exec(
+            "git", "init", "--bare", str(bare),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+
+        result = await WorkspaceManager.push_to_github(
+            "proj-1", str(bare), token="irrelevant",
+        )
+        assert result["success"] is True, result["message"]
+        # Verify the commit is reachable from the bare repo
+        log_proc = await asyncio.create_subprocess_exec(
+            "git", "log", "--oneline", "-1",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=str(bare),
+        )
+        stdout, _ = await log_proc.communicate()
+        assert stdout.decode().strip(), "Bare repo should have at least one commit"
+
+
 class TestGitDiff:
     """Tests for get_workspace_diff."""
 

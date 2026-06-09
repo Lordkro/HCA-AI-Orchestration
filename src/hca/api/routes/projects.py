@@ -142,3 +142,29 @@ async def get_workspace_stats(request: Request) -> dict:
 async def cleanup_workspaces(request: Request) -> dict:
     """Manually trigger workspace cleanup based on retention policy."""
     return await WorkspaceManager.cleanup_old_workspaces()
+
+
+# --- GitHub Push ---
+
+
+class PushToGitHubRequest(BaseModel):
+    """Request body for pushing a project workspace to GitHub."""
+
+    repo_url: str
+    token: str | None = None
+    remote_name: str = "origin"
+    branch: str = "main"
+
+
+@router.post("/{project_id}/github/push")
+async def push_project_to_github(
+    project_id: str, req: PushToGitHubRequest, request: Request
+) -> dict:
+    """Push the project workspace to a GitHub repository."""
+    return await WorkspaceManager.push_to_github(
+        project_id,
+        repo_url=req.repo_url,
+        token=req.token,
+        remote_name=req.remote_name,
+        branch=req.branch,
+    )
