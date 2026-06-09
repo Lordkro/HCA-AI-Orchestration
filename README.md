@@ -98,6 +98,7 @@ Navigate to [http://localhost:8080](http://localhost:8080).
 | [User Guide](docs/USER_GUIDE.md) | Step-by-step setup and usage guide |
 | [Contributing](CONTRIBUTING.md) | Development setup, tests, code style, adding agents |
 | [Prompt Cookbook](docs/PROMPT_COOKBOOK.md) | Prompt engineering reference and best practices |
+| [Workspace Management](WORKSPACE_MANAGEMENT.md) | Workspace lifecycle, retention, git integration |
 
 ## 🏗️ Architecture
 
@@ -129,7 +130,6 @@ Navigate to [http://localhost:8080](http://localhost:8080).
 
 ```
 HCA-Orchestration/
-├── config/                 # Configuration files (YAML/JSON)
 ├── docs/                   # Documentation
 │   ├── ARCHITECTURE.md     # Full system architecture
 │   ├── USER_GUIDE.md       # End-user guide
@@ -139,11 +139,13 @@ HCA-Orchestration/
 │       ├── main.py         # Application entrypoint
 │       ├── core/           # Shared infrastructure
 │       │   ├── config.py       # Settings from env vars
-│       │   ├── ollama_client.py # Ollama API wrapper
-│       │   ├── message_bus.py   # Redis Streams
-│       │   ├── database.py      # SQLite persistence
-│       │   ├── models.py        # Pydantic data models
-│       │   └── logger.py        # Structured logging
+│       │   ├── database.py     # SQLite persistence
+│       │   ├── logger.py       # Structured logging
+│       │   ├── message_bus.py  # Redis Streams
+│       │   ├── metrics.py      # Prometheus metrics
+│       │   ├── models.py       # Pydantic data models
+│       │   ├── ollama_client.py# Ollama API wrapper
+│       │   └── tools.py        # Tool definitions + validation
 │       ├── agents/         # Agent implementations
 │       │   ├── base_agent.py   # Abstract base class
 │       │   ├── pm_agent.py     # Project Manager
@@ -152,26 +154,39 @@ HCA-Orchestration/
 │       │   ├── coder_agent.py
 │       │   └── critic_agent.py
 │       ├── orchestrator/   # Workflow engine
+│       │   ├── guardrails.py
 │       │   ├── pipeline.py
+│       │   ├── sandbox.py
 │       │   ├── task_manager.py
-│       │   └── guardrails.py
+│       │   └── workspace_manager.py
 │       ├── api/            # Web API + UI
 │       │   ├── app.py
 │       │   ├── routes/
+│       │   │   ├── agents.py
+│       │   │   ├── dead_letter.py
+│       │   │   ├── hitl.py
+│       │   │   ├── projects.py
+│       │   │   ├── tasks.py
+│       │   │   └── websocket.py
 │       │   └── static/
 │       └── prompts/        # System prompts per agent
 ├── tests/                  # Test suite
+│   ├── conftest.py         # Shared mock fixtures
 │   ├── unit/               # Unit tests
-│   ├── integration/        # Integration tests
-│   └── fixtures/           # Shared test fixtures
+│   └── integration/        # Integration tests
 ├── scripts/                # Utility scripts
 ├── .data/                  # Runtime data (git-ignored)
 │   ├── workspaces/         # Generated project files
 │   ├── logs/               # Application logs
 │   └── cache/              # Runtime cache
+├── CONTRIBUTING.md
+├── WORKSPACE_MANAGEMENT.md
+├── LICENSE                 # MIT License
 ├── docker-compose.yml      # All services
 ├── Dockerfile              # Python app image
 ├── pyproject.toml          # Dependencies & build config
+├── setup.sh                # One-command setup script
+├── .dockerignore
 └── .env.example            # Configuration template
 ```
 

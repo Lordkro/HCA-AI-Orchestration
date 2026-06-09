@@ -10,7 +10,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from hca.api.app import create_app
-from hca.core.models import AgentRole, AgentStatus, Task, TaskState
+from hca.core.models import AgentRole, AgentStatus, MessageType, Task, TaskState
 from tests.conftest import MockMessageBus, MockOllamaClient, make_message
 
 # ============================================================
@@ -580,3 +580,85 @@ class TestHITL:
         pid, tid = await self._setup(ac, db)
         r = await ac.patch(f"/api/tasks/{tid}/steer", json={"priority": "urgent"})
         assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_inject_feedback_task_not_found(self, client):
+        ac, _ = client
+        r = await ac.post("/api/projects/p1/feedback", json={"task_id": "no-such-task", "content": "fix it"})
+        assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_inject_feedback_with_agent_role(self, client, db):
+        ac, bus = client
+        pid, tid = await self._setup(ac, db)
+        r = await ac.post(
+            f"/api/projects/{pid}/feedback",
+            json={"task_id": tid, "content": "fix it", "agent_role": "coder"},
+        )
+        assert r.status_code == 200
+        assert r.json()["message"] == f"Feedback sent to coder for task {tid}"
+        assert len(bus.published) == 2  # 1 from create + 1 from feedback
+        assert bus.published[-1].recipient == AgentRole.CODER
+
+    @pytest.mark.asyncio
+    async def test_inject_feedback_publishes_to_bus(self, client, db):
+        ac, bus = client
+        pid, tid = await self._setup(ac, db)
+        r = await ac.post(
+            f"/api/projects/{pid}/feedback",
+            json={"task_id": tid, "content": "Please add error handling"},
+        )
+        assert r.status_code == 200
+        assert len(bus.published) == 2
+        msg = bus.published[-1]
+        assert msg.task_id == tid
+        assert msg.type == MessageType.FEEDBACK
+        assert msg.payload.content == "Please add error handling"
+        assert msg.payload.metadata == {"source": "human"}
+
+    @pytest.mark.asyncio
+    async def test_human_review_task_not_found(self, client):
+        ac, _ = client
+        r = await ac.post("/api/projects/p1/review", json={"task_id": "no-such-task", "verdict": "approved"})
+        assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_steer_task_done_rejected(self, client, db):
+        ac, _ = client
+        pid, tid = await self._setup(ac, db)
+        await db.update_task_state(tid, TaskState.DONE)
+        r = await ac.patch(f"/api/tasks/{tid}/steer", json={"priority": "high"})
+        assert r.status_code == 400
+        assert "Cannot steer a completed task" in r.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_steer_task_assigned_to(self, client, db):
+        ac, _ = client
+        pid, tid = await self._setup(ac, db)
+        r = await ac.patch(
+            f"/api/tasks/{tid}/steer",
+            json={"assigned_to": "coder"},
+        )
+        assert r.status_code == 200
+        assert r.json()["task"]["assigned_to"] == "coder"
+
+    @pytest.mark.asyncio
+    async def test_steer_task_invalid_assigned_to(self, client, db):
+        ac, _ = client
+        pid, tid = await self._setup(ac, db)
+        r = await ac.patch(
+            f"/api/tasks/{tid}/steer",
+            json={"assigned_to": "user"},
+        )
+        assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_steer_task_description(self, client, db):
+        ac, _ = client
+        pid, tid = await self._setup(ac, db)
+        r = await ac.patch(
+            f"/api/tasks/{tid}/steer",
+            json={"description": "New description"},
+        )
+        assert r.status_code == 200
+        assert r.json()["task"]["description"] == "New description"

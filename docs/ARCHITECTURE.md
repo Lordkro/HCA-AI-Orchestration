@@ -599,39 +599,44 @@ Prometheus metrics (all prefixed with `hca_`) are exposed at `/metrics`.
 
 ```
 HCA-Orchestration/
+├── docs/                      # Documentation
+│   ├── ARCHITECTURE.md        # Full system architecture
+│   ├── USER_GUIDE.md          # End-user guide
+│   └── PROMPT_COOKBOOK.md     # Prompt engineering reference
 ├── src/hca/
-│   ├── main.py                 # Application entrypoint & bootstrap
+│   ├── main.py                # Application entrypoint & bootstrap
 │   ├── agents/
-│   │   ├── base_agent.py       # Abstract base class (common lifecycle)
-│   │   ├── pm_agent.py         # Project Manager
-│   │   ├── research_agent.py   # Research
-│   │   ├── spec_agent.py       # Specification
-│   │   ├── coder_agent.py      # Code generation
-│   │   └── critic_agent.py     # Quality review
+│   │   ├── base_agent.py      # Abstract base class (common lifecycle)
+│   │   ├── pm_agent.py        # Project Manager
+│   │   ├── research_agent.py  # Research
+│   │   ├── spec_agent.py      # Specification
+│   │   ├── coder_agent.py     # Code generation
+│   │   └── critic_agent.py    # Quality review
 │   ├── api/
-│   │   ├── app.py              # FastAPI app factory, middleware
+│   │   ├── app.py             # FastAPI app factory, middleware
 │   │   ├── routes/
-│   │   │   ├── projects.py     # Project endpoints
-│   │   │   ├── tasks.py        # Task endpoints
-│   │   │   ├── agents.py       # Agent info endpoints
-│   │   │   ├── websocket.py    # Real-time UI stream
-│   │   │   └── dead_letter.py  # Admin dead-letter queue
-│   │   └── static/             # Dashboard frontend
+│   │   │   ├── agents.py      # Agent info endpoints
+│   │   │   ├── dead_letter.py # Admin dead-letter queue
+│   │   │   ├── hitl.py        # Human-in-the-loop endpoints
+│   │   │   ├── projects.py    # Project endpoints
+│   │   │   ├── tasks.py       # Task endpoints
+│   │   │   └── websocket.py   # Real-time UI stream
+│   │   └── static/            # Dashboard frontend
 │   ├── core/
-│   │   ├── config.py           # Pydantic settings from .env
-│   │   ├── message_bus.py      # Redis Streams messaging
-│   │   ├── database.py         # SQLite persistence
-│   │   ├── models.py           # Pydantic data models
-│   │   ├── ollama_client.py    # LLM API wrapper
-│   │   ├── metrics.py          # Prometheus metrics
-│   │   ├── logger.py           # Structured logging
-│   │   └── tools.py            # Tool definitions + validation
+│   │   ├── config.py          # Pydantic settings from .env
+│   │   ├── database.py        # SQLite persistence
+│   │   ├── logger.py          # Structured logging
+│   │   ├── message_bus.py     # Redis Streams messaging
+│   │   ├── metrics.py         # Prometheus metrics
+│   │   ├── models.py          # Pydantic data models
+│   │   ├── ollama_client.py   # LLM API wrapper
+│   │   └── tools.py           # Tool definitions + validation
 │   ├── orchestrator/
-│   │   ├── pipeline.py         # Health check loop
-│   │   ├── task_manager.py     # State machine & task CRUD
-│   │   ├── guardrails.py       # Limits & validation
-│   │   ├── workspace_manager.py# File storage, cleanup, git
-│   │   └── sandbox.py          # Docker-based code validation
+│   │   ├── guardrails.py      # Limits & validation
+│   │   ├── pipeline.py        # Health check loop
+│   │   ├── sandbox.py         # Docker-based code validation
+│   │   ├── task_manager.py    # State machine & task CRUD
+│   │   └── workspace_manager.py# File storage, cleanup, git
 │   └── prompts/
 │       ├── pm.txt
 │       ├── research.txt
@@ -639,11 +644,22 @@ HCA-Orchestration/
 │       ├── coder.txt
 │       └── critic.txt
 ├── tests/
-│   ├── unit/                   # Unit tests (230+)
-│   ├── integration/            # Integration tests
-│   └── conftest.py             # Shared mock fixtures
-├── docker-compose.yml
-├── Dockerfile
-├── pyproject.toml
-└── .env.example
+│   ├── conftest.py            # Shared mock fixtures
+│   ├── unit/                  # Unit tests
+│   └── integration/           # Integration tests
+├── scripts/                   # Utility scripts
+├── .data/                     # Runtime data (git-ignored)
+│   ├── workspaces/            # Generated project files
+│   ├── logs/                  # Application logs
+│   └── cache/                 # Runtime cache
+├── CONTRIBUTING.md
+├── WORKSPACE_MANAGEMENT.md
+├── README.md
+├── LICENSE                    # MIT License
+├── docker-compose.yml         # All services
+├── Dockerfile                 # Python app image
+├── pyproject.toml             # Dependencies & build config
+├── setup.sh                   # One-command setup script
+├── .dockerignore
+└── .env.example               # Configuration template
 ```

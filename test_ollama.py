@@ -1,5 +1,5 @@
 import asyncio, sys
-from src.core.ollama_client import OllamaClient
+from hca.core.ollama_client import OllamaClient
 
 async def test():
     c = OllamaClient(base_url='http://ollama:11434', default_model='qwen3:14b', timeout=60)

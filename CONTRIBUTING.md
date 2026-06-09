@@ -127,20 +127,27 @@ src/hca/
 │   └── critic_agent.py
 ├── api/                 # FastAPI layer
 │   ├── app.py           # App factory, middleware, CORS
-│   └── routes/          # Endpoints (projects, tasks, agents, etc.)
+│   └── routes/
+│       ├── agents.py
+│       ├── dead_letter.py
+│       ├── hitl.py
+│       ├── projects.py
+│       ├── tasks.py
+│       └── websocket.py
 ├── core/                # Shared infrastructure
 │   ├── config.py        # Pydantic-based settings
-│   ├── message_bus.py   # Redis Streams messaging
 │   ├── database.py      # SQLite persistence
+│   ├── logger.py        # Structured logging setup
+│   ├── message_bus.py   # Redis Streams messaging
+│   ├── metrics.py       # Prometheus metrics
 │   ├── models.py        # Data models (TaskState, AgentMessage, etc.)
 │   ├── ollama_client.py # LLM API wrapper
-│   ├── metrics.py       # Prometheus metrics
-│   ├── logger.py        # Structured logging setup
 │   └── tools.py         # Tool definitions for agents
 ├── orchestrator/        # Workflow engine
-│   ├── pipeline.py      # Health check loop
-│   ├── task_manager.py  # State machine + task CRUD
 │   ├── guardrails.py    # Limits and validation
+│   ├── pipeline.py      # Health check loop
+│   ├── sandbox.py       # Docker-based code validation
+│   ├── task_manager.py  # State machine + task CRUD
 │   └── workspace_manager.py
 └── prompts/             # System prompts (hot-reloadable)
     ├── pm.txt
