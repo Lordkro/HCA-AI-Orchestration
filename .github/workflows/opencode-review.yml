@@ -1,0 +1,48 @@
+name: opencode-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: anomalyco/opencode/github@latest
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          model: opencode/big-pickle
+          use_github_token: true
+          prompt: |
+            Review this pull request against the project conventions:
+
+            Code quality:
+            - Must pass `ruff check src/ tests/` (no new violations)
+            - Must pass `mypy src/` (no new type errors)
+            - Must pass `python -m pytest tests/ --cov=src/hca` (tests + coverage)
+            - Python 3.11/3.12 compatible
+
+            Architecture:
+            - Async/await throughout; avoid sync I/O in async paths (use asyncio.to_thread)
+            - Database uses aiosqlite with WAL mode; retry SQLITE_BUSY with backoff
+            - New features need unit tests in tests/unit/
+            - API changes should update docs/ and keep /api/health endpoints functional
+
+            Patterns:
+            - Branch name: issue-N-short-description
+            - Use structlog for logging, not print
+            - Agent prompts live in src/hca/prompts/*.txt
+            - Docker changes: check docker-compose profiles (cpu/nvidia/rocm), Dockerfile non-root user
+            - Security: Bearer-token auth middleware for API; no secrets in code
+
+            Check for bugs, missing error handling, and consistency with existing patterns.
