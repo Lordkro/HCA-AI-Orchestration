@@ -17,7 +17,6 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   release:
@@ -72,6 +71,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Derive lowercased image name
+        id: img
+        run: |
+          # GHCR requires lowercase repository names
+          echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -85,8 +90,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.release.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:${{ needs.release.outputs.version }}
+            ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:latest
           labels: |
             org.opencontainers.image.version=${{ needs.release.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}

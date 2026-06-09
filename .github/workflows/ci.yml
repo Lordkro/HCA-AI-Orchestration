@@ -13,7 +13,6 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   test:
@@ -55,6 +54,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Derive lowercased image name
+        id: img
+        run: |
+          echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -66,7 +70,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}
           tags: |
             type=semver,pattern={{version}}
             type=ref,event=branch
