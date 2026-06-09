@@ -25,7 +25,7 @@ An AI agent team that takes your product ideas and builds them into working appl
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose v2+
 - At least 8 GB system RAM (16 GB+ recommended)
-- **No GPU required** — CPU mode works on any system; NVIDIA and AMD GPU profiles available
+- **No GPU required** — CPU mode works on any system; NVIDIA, AMD, and Apple Silicon GPU profiles available
 
 ### One-command setup (recommended)
 
@@ -43,6 +43,7 @@ For NVIDIA GPUs, install the [container toolkit](https://docs.nvidia.com/datacen
 |------|---------|
 | `--profile nvidia` | Force NVIDIA profile (skip auto-detect) |
 | `--profile rocm` | Force AMD ROCm profile |
+| `--profile metal` | Force Apple Silicon (Metal) profile |
 | `--models "llama3.2:3b qwen2.5-coder:3b"` | Pull different models |
 | `--skip-pull` | Skip model downloading |
 
@@ -58,6 +59,7 @@ For NVIDIA GPUs, install the [container toolkit](https://docs.nvidia.com/datacen
 | **CPU** (default) | `docker compose up` | No GPU needed |
 | **NVIDIA GPU** | `docker compose --profile nvidia up` | [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
 | **AMD ROCm** | `docker compose --profile rocm up` | AMD GPU with ROCm driver |
+| **Apple Metal** | `docker compose --profile metal up` | Apple Silicon (M-series) Mac |
 
 #### 2. Pick the right model for your VRAM
 

@@ -7,6 +7,7 @@
 #   Default (CPU)         – docker compose up
 #   NVIDIA GPU            – docker compose --profile nvidia up
 #   AMD ROCm GPU          – docker compose --profile rocm up
+#   Apple Silicon (Metal) – docker compose --profile metal up
 #   One-time model pull   – docker compose --profile setup run model-puller
 #
 # Environment variables (OLLAMA_IMAGE, OLLAMA_TAG, etc.) can be
@@ -23,6 +24,7 @@ services:
   # For dedicated GPU profiles use:
   #   docker compose --profile nvidia up   (NVIDIA CUDA)
   #   docker compose --profile rocm up     (AMD ROCm)
+  #   docker compose --profile metal up    (Apple Silicon Metal)
   #
   # Only ONE Ollama service should be active at a time.
   # --------------------------------------------------------
@@ -83,6 +85,36 @@ services:
       - OLLAMA_DEBUG=${OLLAMA_DEBUG:-0}
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
       - CUDA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # --------------------------------------------------------
+  # Apple Silicon (Metal) – activates via --profile metal
+  # --------------------------------------------------------
+  ollama-metal:
+    image: ${OLLAMA_IMAGE:-ollama/ollama}:${OLLAMA_TAG:-latest}
+    container_name: hca-ollama
+    init: true
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    profiles:
+      - metal
+    platform: linux/arm64
+    environment:
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-2}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-2}
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_LOAD_TIMEOUT=${OLLAMA_LOAD_TIMEOUT:-10m}
+      - OLLAMA_GPU_OVERHEAD=${OLLAMA_GPU_OVERHEAD:-2147483648}
+      - OLLAMA_DEBUG=${OLLAMA_DEBUG:-0}
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-5m}
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 30s

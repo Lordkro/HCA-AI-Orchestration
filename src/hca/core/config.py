@@ -67,6 +67,13 @@ HARDWARE_BACKENDS: dict[str, dict[str, str]] = {
         "compose_profile": "rocm",
         "note": "ROCm-only image; /dev/kfd + /dev/dri passthrough.",
     },
+    "metal": {
+        "label": "Apple Metal",
+        "image": "ollama/ollama",
+        "tag": "latest",
+        "compose_profile": "metal",
+        "note": "Apple Silicon (M-series); uses Metal GPU via arm64 image.",
+    },
 }
 
 

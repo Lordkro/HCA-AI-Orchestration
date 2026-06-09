@@ -7,6 +7,8 @@
 #
 # Usage:  bash setup.sh
 #         bash setup.sh --profile nvidia   # force NVIDIA profile
+#         bash setup.sh --profile rocm     # force AMD ROCm profile
+#         bash setup.sh --profile metal    # force Apple Silicon (Metal) profile
 #         bash setup.sh --profile cpu      # force CPU-only mode
 #         bash setup.sh --models "llama3.2:3b qwen2.5-coder:3b"
 #         bash setup.sh --skip-pull        # skip model pulling
@@ -56,7 +58,7 @@ Usage: bash setup.sh [OPTIONS]
 
 Options:
   --profile <profile>    Force a Docker Compose profile:
-                         auto | cpu | nvidia | rocm  (default: auto)
+                         auto | cpu | nvidia | rocm | metal  (default: auto)
   --models "<list>"      Models to pull, space-separated
                          (default: qwen3:14b qwen2.5-coder:14b)
   --skip-pull            Skip pulling LLM models
@@ -65,6 +67,7 @@ Options:
 Examples:
   bash setup.sh                          # Auto-detect + full setup
   bash setup.sh --profile nvidia         # Force NVIDIA profile
+  bash setup.sh --profile metal          # Force Apple Silicon (Metal) profile
   bash setup.sh --models "llama3.2:3b qwen2.5-coder:3b"
 EOF
     exit 0
@@ -127,6 +130,13 @@ fi
 header "[2/6] Detecting hardware"
 
 detect_gpu_profile() {
+    # Check for Apple Silicon (Metal)
+    if [[ "$(uname -s)" == "Darwin" ]] && [[ "$(uname -m)" == "arm64" ]]; then
+        echo "metal"
+        info "Apple Silicon (M-series) detected — using Metal GPU profile."
+        return
+    fi
+
     # Check for NVIDIA GPU
     if command -v nvidia-smi &>/dev/null; then
         local gpu_info
@@ -167,8 +177,9 @@ case "$PROFILE" in
     cpu)    PROFILE_FLAG="" ;;
     nvidia) PROFILE_FLAG="--profile nvidia" ;;
     rocm)   PROFILE_FLAG="--profile rocm" ;;
+    metal)  PROFILE_FLAG="--profile metal" ;;
     *)
-        fail "Unknown profile: $PROFILE. Valid: cpu, nvidia, rocm"
+        fail "Unknown profile: $PROFILE. Valid: cpu, nvidia, rocm, metal"
         exit 1
         ;;
 esac
