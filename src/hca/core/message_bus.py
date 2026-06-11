@@ -358,14 +358,23 @@ class MessageBus:
         agent: AgentRole,
         min_idle_ms: int = 60_000,
         count: int = 10,
+        consumer_name: str | None = None,
     ) -> list[tuple[str, str, AgentMessage]]:
         """Claim messages that have been pending too long (from crashed consumers).
 
         Uses XAUTOCLAIM to take ownership of stale messages that another
         consumer failed to acknowledge.
+
+        Args:
+            agent: The agent role consuming messages.
+            min_idle_ms: Minimum idle time (ms) before a message is considered stale.
+            count: Max messages to claim.
+            consumer_name: Unique consumer name for this incarnation. When set to
+                a value different from the original consumer, XAUTOCLAIM will
+                reclaim messages left pending by a previous incarnation.
         """
         inbox_stream = AGENT_STREAM.format(agent=agent.value)
-        consumer = agent.value
+        consumer = consumer_name or agent.value
         messages: list[tuple[str, str, AgentMessage]] = []
 
         try:
@@ -529,17 +538,6 @@ class MessageBus:
             logger.debug("streams_trimmed")
         except (aioredis.ConnectionError, aioredis.TimeoutError) as e:
             logger.warning("stream_trim_failed", error=str(e))
-
-    async def flush_all(self) -> None:
-        """Delete all streams and data. USE WITH CAUTION."""
-        agents = [role for role in AgentRole if role not in (AgentRole.SYSTEM, AgentRole.USER)]
-        for agent in agents:
-            stream = AGENT_STREAM.format(agent=agent.value)
-            await self.redis.delete(stream)
-        await self.redis.delete(BROADCAST_STREAM)
-        await self.redis.delete(EVENT_STREAM)
-        await self.redis.delete(DEAD_LETTER_STREAM)
-        logger.warning("all_streams_flushed")
 
     # --------------------------------------------------------
     # Diagnostics

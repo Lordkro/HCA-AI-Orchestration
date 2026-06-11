@@ -35,17 +35,6 @@ class ConnectionManager:
         except ValueError:
             pass  # Already removed
 
-    async def broadcast(self, message: str) -> None:
-        """Send a message to all connected clients."""
-        disconnected: list[WebSocket] = []
-        for connection in list(self.active_connections):
-            try:
-                await connection.send_text(message)
-            except Exception:
-                disconnected.append(connection)
-        for conn in disconnected:
-            self.disconnect(conn)
-
 
 manager = ConnectionManager()
 

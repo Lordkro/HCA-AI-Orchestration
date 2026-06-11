@@ -16,8 +16,7 @@ The team consists of five AI agents:
 ## Prerequisites
 
 - **Docker** and **Docker Compose** (v2+)
-- An AMD GPU with ROCm support (optional — CPU-only works, but is slower)
-- Apple Silicon (M-series) with Metal GPU acceleration (optional — CPU-only works)
+- A GPU with Vulkan support (AMD, Intel, NVIDIA with open drivers) or ROCm (AMD) or Metal (Apple Silicon). CPU-only works but is slower.
 - At least 20GB free disk space for model downloads and workspaces
 - At least 16GB RAM (32GB recommended with GPU)
 

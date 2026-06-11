@@ -8,6 +8,7 @@
 # Usage:  bash setup.sh
 #         bash setup.sh --profile nvidia   # force NVIDIA profile
 #         bash setup.sh --profile rocm     # force AMD ROCm profile
+#         bash setup.sh --profile vulkan   # force Vulkan GPU profile
 #         bash setup.sh --profile metal    # force Apple Silicon (Metal) profile
 #         bash setup.sh --profile cpu      # force CPU-only mode
 #         bash setup.sh --models "llama3.2:3b qwen2.5-coder:3b"
@@ -58,7 +59,7 @@ Usage: bash setup.sh [OPTIONS]
 
 Options:
   --profile <profile>    Force a Docker Compose profile:
-                         auto | cpu | nvidia | rocm | metal  (default: auto)
+                         auto | cpu | nvidia | rocm | vulkan | metal  (default: auto)
   --models "<list>"      Models to pull, space-separated
                          (default: qwen3:14b qwen2.5-coder:14b)
   --skip-pull            Skip pulling LLM models
@@ -67,6 +68,7 @@ Options:
 Examples:
   bash setup.sh                          # Auto-detect + full setup
   bash setup.sh --profile nvidia         # Force NVIDIA profile
+  bash setup.sh --profile vulkan         # Force Vulkan GPU profile
   bash setup.sh --profile metal          # Force Apple Silicon (Metal) profile
   bash setup.sh --models "llama3.2:3b qwen2.5-coder:3b"
 EOF
@@ -86,7 +88,7 @@ done
 # ──────────────────────────────────────────────
 # 1. Prerequisite checks
 # ──────────────────────────────────────────────
-header "[1/6] Checking prerequisites"
+header "[1/7] Checking prerequisites"
 
 # Docker
 if command -v docker &>/dev/null; then
@@ -127,7 +129,7 @@ fi
 # ──────────────────────────────────────────────
 # 2. Hardware detection & profile selection
 # ──────────────────────────────────────────────
-header "[2/6] Detecting hardware"
+header "[2/7] Detecting hardware"
 
 detect_gpu_profile() {
     # Check for Apple Silicon (Metal)
@@ -161,6 +163,13 @@ detect_gpu_profile() {
         return
     fi
 
+    # Check for Vulkan-capable GPU (any GPU with /dev/dri render node)
+    if [[ -e /dev/dri/renderD128 ]]; then
+        echo "vulkan"
+        info "GPU detected — using Vulkan profile (recommended fallback for most GPUs)."
+        return
+    fi
+
     # CPU-only fallback
     echo "cpu"
     info "No supported GPU detected — using CPU-only profile."
@@ -174,12 +183,13 @@ else
 fi
 
 case "$PROFILE" in
-    cpu)    PROFILE_FLAG="" ;;
-    nvidia) PROFILE_FLAG="--profile nvidia" ;;
-    rocm)   PROFILE_FLAG="--profile rocm" ;;
-    metal)  PROFILE_FLAG="--profile metal" ;;
+    cpu)    PROFILE_FLAG=""                     ; OLLAMA_SERVICE="ollama" ;;
+    nvidia) PROFILE_FLAG="--profile nvidia"     ; OLLAMA_SERVICE="ollama-nvidia" ;;
+    rocm)   PROFILE_FLAG="--profile rocm"       ; OLLAMA_SERVICE="ollama-rocm" ;;
+    vulkan) PROFILE_FLAG="--profile vulkan"     ; OLLAMA_SERVICE="ollama-vulkan" ;;
+    metal)  PROFILE_FLAG="--profile metal"      ; OLLAMA_SERVICE="ollama-metal" ;;
     *)
-        fail "Unknown profile: $PROFILE. Valid: cpu, nvidia, rocm, metal"
+        fail "Unknown profile: $PROFILE. Valid: cpu, nvidia, rocm, vulkan, metal"
         exit 1
         ;;
 esac
@@ -187,7 +197,7 @@ esac
 # ──────────────────────────────────────────────
 # 3. Environment configuration
 # ──────────────────────────────────────────────
-header "[3/6] Configuring environment"
+header "[3/7] Configuring environment"
 
 ENV_FILE="$PROJECT_ROOT/.env"
 ENV_EXAMPLE="$PROJECT_ROOT/.env.example"
@@ -215,7 +225,7 @@ fi
 # ──────────────────────────────────────────────
 # 4. Port conflict check
 # ──────────────────────────────────────────────
-header "[4/6] Checking port availability"
+header "[4/7] Checking port availability"
 
 check_port() {
     local port=$1
@@ -253,9 +263,19 @@ if ! $PORTS_OK; then
 fi
 
 # ──────────────────────────────────────────────
-# 5. Start services
+# 5. Ensure writable data directories
 # ──────────────────────────────────────────────
-header "[5/6] Starting services"
+header "[5/7] Ensuring writable data directories"
+
+mkdir -p workspace .data
+# Match the user:group set in docker-compose.yml (HOST_UID:HOST_GID)
+chown "${HOST_UID:-1000}:${HOST_GID:-1000}" workspace .data 2>/dev/null || true
+ok "Workspace directories ready"
+
+# ──────────────────────────────────────────────
+# 6. Start services
+# ──────────────────────────────────────────────
+header "[6/7] Starting services"
 
 echo "Starting Ollama, Redis, and the Orchestrator..."
 echo "  Profile: ${PROFILE}"
@@ -264,17 +284,17 @@ echo ""
 # Pull images first (shows progress)
 info "Pulling Docker images..."
 if [[ -n "$PROFILE_FLAG" ]]; then
-    $COMPOSE_CMD $PROFILE_FLAG pull ollama redis 2>&1 | tail -5 || true
+    $COMPOSE_CMD $PROFILE_FLAG pull "$OLLAMA_SERVICE" redis 2>&1 | tail -5 || true
 else
-    $COMPOSE_CMD pull ollama redis 2>&1 | tail -5 || true
+    $COMPOSE_CMD pull "$OLLAMA_SERVICE" redis 2>&1 | tail -5 || true
 fi
 
 # Start services
 info "Starting services..."
 if [[ -n "$PROFILE_FLAG" ]]; then
-    $COMPOSE_CMD $PROFILE_FLAG up -d ollama redis 2>&1 | tail -3
+    $COMPOSE_CMD $PROFILE_FLAG up -d "$OLLAMA_SERVICE" redis 2>&1 | tail -3
 else
-    $COMPOSE_CMD up -d ollama redis 2>&1 | tail -3
+    $COMPOSE_CMD up -d "$OLLAMA_SERVICE" redis 2>&1 | tail -3
 fi
 
 # Wait for Ollama to be healthy
@@ -316,7 +336,7 @@ done
 # ──────────────────────────────────────────────
 # 6. Pull LLM models
 # ──────────────────────────────────────────────
-header "[6/6] Pulling LLM models"
+header "[7/7] Pulling LLM models"
 
 if $SKIP_PULL; then
     info "Skipping model pull (--skip-pull)."
@@ -324,7 +344,8 @@ if $SKIP_PULL; then
 else
     if [[ -z "$MODELS_TO_PULL" ]]; then
         # Read from .env or use defaults
-        MODELS_TO_PULL="${OLLAMA_MODELS_TO_PULL:-qwen3:14b qwen2.5-coder:14b}"
+        # Pull models matching .env defaults (overridable via OLLAMA_MODELS_TO_PULL)
+        MODELS_TO_PULL="${OLLAMA_MODELS_TO_PULL:-qwen3:8b qwen2.5-coder:7b}"
     fi
 
     echo "Models to pull: $MODELS_TO_PULL"

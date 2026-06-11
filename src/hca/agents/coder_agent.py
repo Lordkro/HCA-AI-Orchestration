@@ -74,6 +74,24 @@ class CoderAgent(BaseAgent):
 
     async def _handle_coding_task(self, message: AgentMessage) -> AgentMessage | None:
         """Generate code based on the specification."""
+        # Gracefully retry FAILED tasks instead of erroring on invalid transition
+        if self.task_manager:
+            task = await self.task_manager.db.get_task(message.task_id)
+            if task is None:
+                logger.warning("coder_task_not_found", task_id=message.task_id)
+                return None
+            if task.state == TaskState.DONE:
+                logger.info("coder_task_already_done", task_id=message.task_id)
+                return None
+            if task.state == TaskState.FAILED:
+                logger.info(
+                    "coder_retrying_failed_task",
+                    task_id=message.task_id,
+                    project_id=message.project_id,
+                )
+                await self._transition_task(message.task_id, TaskState.PENDING)
+                await self._transition_task(message.task_id, TaskState.ASSIGNED)
+
         await self._transition_task(message.task_id, TaskState.IN_PROGRESS)
         self._set_activity("Writing implementation code")
 

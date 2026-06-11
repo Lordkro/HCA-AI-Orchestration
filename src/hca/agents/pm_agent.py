@@ -350,12 +350,36 @@ who will work on this next.  Be concise."""
         )
 
     async def _handle_status_update(self, message: AgentMessage) -> AgentMessage | None:
-        """Handle status updates from agents."""
+        """Handle status updates from agents.
+
+        Auto-retries FAILED tasks by transitioning them back to PENDING
+        so the next assignment cycle can pick them up.
+        """
         logger.info(
             "pm_status_update",
             sender=message.sender.value,
             content=message.payload.content[:100],
+            task_id=message.task_id or None,
+            project_id=message.project_id,
         )
+
+        if message.task_id and self.task_manager:
+            task = await self.db.get_task(message.task_id)
+            if task and task.state == TaskState.FAILED:
+                logger.info(
+                    "pm_retrying_failed_task",
+                    task_id=task.id,
+                    title=task.title,
+                )
+                await self._transition_task(task.id, TaskState.PENDING)
+                return await self._assign_next_task(task.project_id)
+            logger.info("pm_status_update_no_action", task_id=message.task_id, task_state=getattr(task, 'state', None) if task else None)
+            return None
+
+        if message.project_id and self.task_manager:
+            logger.info("pm_status_update_triggering_assign", project_id=message.project_id)
+            return await self._assign_next_task(message.project_id)
+
         return None
 
     async def _handle_feedback(self, message: AgentMessage) -> AgentMessage | None:
@@ -439,6 +463,8 @@ Please provide a clear, decisive answer to help them proceed."""
             return None
 
         assignable = await self.task_manager.get_assignable_tasks(project_id)
+
+        # If no PENDING tasks are ready, try retrying any FAILED tasks
         if not assignable:
             logger.info("pm_no_assignable_tasks", project_id=project_id)
 
@@ -447,8 +473,30 @@ Please provide a clear, decisive answer to help them proceed."""
             if progress["total_tasks"] > 0 and progress["completed"] == progress["total_tasks"]:
                 await self.db.update_project(project_id, status="completed")
                 logger.info("pm_project_completed", project_id=project_id)
+                return None
 
-            return None
+            # Retry FAILED tasks whose dependencies are satisfied
+            all_tasks = await self.db.list_tasks(project_id)
+            logger.info("pm_assign_all_tasks", project_id=project_id, count=len(all_tasks), states={t.state.value for t in all_tasks})
+            done_ids = {t.id for t in all_tasks if t.state == TaskState.DONE}
+            retried = 0
+            for task in all_tasks:
+                if task.state == TaskState.FAILED:
+                    if not task.depends_on or all(dep_id in done_ids for dep_id in task.depends_on):
+                        logger.info(
+                            "pm_retrying_failed_task_in_assign",
+                            task_id=task.id,
+                            title=task.title,
+                            deps=task.depends_on,
+                        )
+                        await self._transition_task(task.id, TaskState.PENDING)
+                        retried += 1
+
+            logger.info("pm_retried_failed_tasks", project_id=project_id, count=retried)
+            assignable = await self.task_manager.get_assignable_tasks(project_id)
+            logger.info("pm_assignable_after_retry", project_id=project_id, count=len(assignable))
+            if not assignable:
+                return None
 
         first_msg: AgentMessage | None = None
 

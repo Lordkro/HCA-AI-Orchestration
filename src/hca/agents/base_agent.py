@@ -126,8 +126,9 @@ class BaseAgent(ABC):
     MAX_PROCESSING_RETRIES: int = 1
     # Retry backoff: base delay in seconds (doubles each retry)
     RETRY_BASE_DELAY: float = 2.0
-    # Stale message reclaim threshold (ms)
-    STALE_CLAIM_MS: int = 120_000
+    # Stale message reclaim threshold (ms) — low enough to recover quickly
+    # from a crash mid-processing, high enough to avoid thrashing.
+    STALE_CLAIM_MS: int = 10_000
 
     def __init__(
         self,
@@ -148,6 +149,10 @@ class BaseAgent(ABC):
 
         self._running = False
         self._processing = False  # True while handling a message (for drain)
+
+        # Unique consumer instance ID so XAUTOCLAIM can reclaim stale
+        # messages from previous incarnations after a crash/restart.
+        self._consumer_id = f"{role.value}:{id(self)}"
 
         # Activity tracking for UI feedback
         self._current_activity: str = ""
@@ -215,16 +220,18 @@ class BaseAgent(ABC):
                 # Heartbeat
                 await self._emit_heartbeat()
 
-                # 1. Reclaim stale messages
+                # 1. Reclaim stale messages from previous incarnations
                 stale = await self.bus.claim_stale_messages(
-                    self.role, min_idle_ms=self.STALE_CLAIM_MS
+                    self.role, min_idle_ms=self.STALE_CLAIM_MS, consumer_name=self._consumer_id
                 )
                 for stream_name, entry_id, msg in stale:
                     if msg.sender != self.role:
                         await self._handle_message_reliable(stream_name, entry_id, msg)
 
-                # 2. Consume new messages
-                results = await self.bus.consume(self.role, last_id=">", block_ms=2000)
+                # 2. Consume new messages (unique consumer_id so XAUTOCLAIM works)
+                results = await self.bus.consume(
+                    self.role, consumer_name=self._consumer_id, last_id=">", block_ms=2000
+                )
                 if not results:
                     # No messages, pause briefly to avoid tight loop
                     await asyncio.sleep(0.5)
@@ -593,12 +600,12 @@ class BaseAgent(ABC):
                     max_tokens=max_tokens,
                     auto_trim=True,
                 ),
-                timeout=300,
+                timeout=600,
             )
         except TimeoutError:
             self.stats.llm_errors += 1
             record_agent_llm_error(self.role.value)
-            logger.error("agent_think_timeout", agent=self.role.value, timeout=300)
+            logger.error("agent_think_timeout", agent=self.role.value, timeout=600)
             self.status = AgentStatus.ERROR
             agent_status_metric.labels(agent=self.role.value).set(2)
             raise

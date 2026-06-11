@@ -89,6 +89,11 @@ bus_connected = Gauge(
     "1 if the message bus is connected to Redis, 0 otherwise",
 )
 
+db_connected = Gauge(
+    "hca_db_connected",
+    "1 if the database connection is open, 0 otherwise",
+)
+
 # ============================================================
 # Database metrics
 # ============================================================
@@ -103,28 +108,6 @@ db_errors_total = Counter(
     "hca_db_errors_total",
     "Total database errors",
     ["operation"],
-)
-
-db_size_bytes = Gauge(
-    "hca_db_size_bytes",
-    "Database file size in bytes",
-)
-
-db_project_count = Gauge(
-    "hca_db_project_count",
-    "Number of projects by status",
-    ["status"],
-)
-
-db_task_count = Gauge(
-    "hca_db_task_count",
-    "Number of tasks by state",
-    ["state"],
-)
-
-db_connected = Gauge(
-    "hca_db_connected",
-    "1 if the database connection is open, 0 otherwise",
 )
 
 # ============================================================
@@ -245,14 +228,6 @@ def record_bus_reconnect() -> None:
     bus_reconnections_total.inc()
 
 
-def record_db_query(operation: str) -> None:
-    db_queries_total.labels(operation=operation).inc()
-
-
-def record_db_error(operation: str) -> None:
-    db_errors_total.labels(operation=operation).inc()
-
-
 def record_agent_message_received(agent: str) -> None:
     agent_messages_received_total.labels(agent=agent).inc()
 
@@ -279,3 +254,11 @@ def record_agent_llm_error(agent: str) -> None:
 
 def record_agent_llm_duration(agent: str, duration_s: float) -> None:
     agent_llm_duration_seconds.labels(agent=agent).observe(duration_s)
+
+
+def record_db_query(operation: str) -> None:
+    db_queries_total.labels(operation=operation).inc()
+
+
+def record_db_error(operation: str) -> None:
+    db_errors_total.labels(operation=operation).inc()

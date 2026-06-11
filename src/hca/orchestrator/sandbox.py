@@ -17,12 +17,6 @@ from hca.core.config import settings
 
 logger = structlog.get_logger()
 
-# Languages we know how to test
-SUPPORTED_LANGUAGES = {"python", "javascript", "typescript"}
-
-# File extensions we consider "runnable" entrypoints
-_RUNNABLE_EXTENSIONS = {".py", ".js", ".ts", ".sh"}
-
 
 class SandboxResult:
     """Result of a sandboxed code execution check."""

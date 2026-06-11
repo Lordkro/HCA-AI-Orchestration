@@ -13,7 +13,13 @@ import asyncio
 import structlog
 
 from hca.core.message_bus import MessageBus
-from hca.core.models import TaskState
+from hca.core.models import (
+    AgentMessage,
+    AgentRole,
+    MessagePayload,
+    MessageType,
+    TaskState,
+)
 from hca.orchestrator.guardrails import Guardrails
 from hca.orchestrator.task_manager import TaskManager
 from hca.orchestrator.workspace_manager import WorkspaceManager
@@ -155,6 +161,23 @@ class Pipeline:
                                 "reason": "timeout",
                             },
                         )
+                        # Notify PM so it can retry the failed task
+                        await self.bus.publish(
+                            AgentMessage(
+                                sender=AgentRole.SYSTEM,
+                                recipient=AgentRole.PM,
+                                type=MessageType.STATUS_UPDATE,
+                                project_id=project.id,
+                                task_id=task.id,
+                                payload=MessagePayload(
+                                    content=(
+                                        f"Task '{task.title}' (ID: {task.id}) timed out in "
+                                        f"state '{old_state}'.  Marked FAILED."
+                                    ),
+                                    metadata={"reason": "timeout"},
+                                ),
+                            )
+                        )
 
                 # Refresh task list after potential state changes
                 all_tasks = await db.list_tasks(project.id)
@@ -203,6 +226,40 @@ class Pipeline:
                             "reason": "All active tasks are blocked or failed",
                         },
                     )
+                    # Wake the PM to retry FAILED tasks and break the deadlock
+                    await self.bus.publish(
+                        AgentMessage(
+                            sender=AgentRole.SYSTEM,
+                            recipient=AgentRole.PM,
+                            type=MessageType.STATUS_UPDATE,
+                            project_id=project.id,
+                            task_id="",
+                            payload=MessagePayload(
+                                content=(
+                                    f"Deadlock detected: all remaining tasks are blocked or "
+                                    f"failed.  Attempting to retry failed tasks."
+                                ),
+                                metadata={"reason": "deadlock"},
+                            ),
+                        )
+                    )
+
+                # 5. Nudge the PM about unassigned PENDING tasks
+                pending = [t for t in all_tasks if t.state == TaskState.PENDING]
+                if pending:
+                    await self.bus.publish(
+                        AgentMessage(
+                            sender=AgentRole.SYSTEM,
+                            recipient=AgentRole.PM,
+                            type=MessageType.STATUS_UPDATE,
+                            project_id=project.id,
+                            task_id="",
+                            payload=MessagePayload(
+                                content=f"{len(pending)} PENDING task(s) need assignment.",
+                                metadata={"reason": "pending_tasks"},
+                            ),
+                        )
+                    )
 
         except Exception as e:
             logger.error("pipeline_health_check_error", error=str(e))
@@ -220,17 +277,10 @@ class Pipeline:
 
             for project in projects:
                 all_tasks = await db.list_tasks(project.id)
+
+                # Reset tasks stuck in transient states back to PENDING
                 resume_states = {TaskState.ASSIGNED, TaskState.IN_PROGRESS}
                 stuck = [t for t in all_tasks if t.state in resume_states]
-
-                if not stuck:
-                    continue
-
-                logger.info(
-                    "project_resume_resetting_stuck_tasks",
-                    project_id=project.id,
-                    count=len(stuck),
-                )
                 for task in stuck:
                     old_state = task.state.value
                     task.state = TaskState.PENDING
@@ -245,6 +295,82 @@ class Pipeline:
                             "new_state": TaskState.PENDING.value,
                             "reason": "resume_after_restart",
                         },
+                    )
+                    logger.info(
+                        "task_reset_to_pending",
+                        task_id=task.id,
+                        old_state=old_state,
+                    )
+
+                # Reset FAILED tasks to PENDING so the PM can retry them
+                failed = [t for t in all_tasks if t.state == TaskState.FAILED]
+                for task in failed:
+                    logger.info(
+                        "task_retrying_on_resume",
+                        task_id=task.id,
+                        title=task.title,
+                    )
+                    task.state = TaskState.PENDING
+                    task.feedback = ""
+                    await db.update_task(task)
+                    await self.bus.publish_ui_event(
+                        "task_state_changed",
+                        {
+                            "task_id": task.id,
+                            "project_id": project.id,
+                            "old_state": TaskState.FAILED.value,
+                            "new_state": TaskState.PENDING.value,
+                            "reason": "resume_retry",
+                        },
+                    )
+
+                # Re-trigger the PM if there are PENDING or FAILED tasks
+                has_pending = any(t.state == TaskState.PENDING for t in all_tasks)
+                has_failed = any(t.state == TaskState.FAILED for t in all_tasks)
+
+                if stuck or has_pending or has_failed:
+                    if stuck or has_failed:
+                        logger.info(
+                            "project_resume_reset",
+                            project_id=project.id,
+                            stuck_count=len(stuck),
+                            failed_retried=len(failed),
+                        )
+                    # Wake the PM to assign tasks
+                    await self.bus.publish(
+                        AgentMessage(
+                            sender=AgentRole.SYSTEM,
+                            recipient=AgentRole.PM,
+                            type=MessageType.STATUS_UPDATE,
+                            project_id=project.id,
+                            task_id="",
+                            payload=MessagePayload(
+                                content=f"Project resumed after restart. Tasks need assignment.",
+                                metadata={"reason": "resume"},
+                            ),
+                        )
+                    )
+
+                # No tasks at all — re-send the original project idea as a
+                # SYSTEM message so the PM decomposes it into tasks.
+                if not all_tasks and project.idea:
+                    logger.info(
+                        "project_resume_no_tasks",
+                        project_id=project.id,
+                        project_name=project.name,
+                    )
+                    await self.bus.publish(
+                        AgentMessage(
+                            sender=AgentRole.USER,
+                            recipient=AgentRole.PM,
+                            type=MessageType.SYSTEM,
+                            project_id=project.id,
+                            task_id="",
+                            payload=MessagePayload(
+                                content=project.idea,
+                                metadata={"reason": "resume_no_tasks"},
+                            ),
+                        )
                     )
 
             logger.info("project_resume_complete")

@@ -20,7 +20,7 @@ from hca.agents.pm_agent import PMAgent
 from hca.agents.research_agent import ResearchAgent
 from hca.agents.spec_agent import SpecAgent
 from hca.api.app import create_app
-from hca.core.config import settings
+from hca.core.config import check_hardware_fit, settings
 from hca.core.database import Database
 from hca.core.logger import setup_logging
 from hca.core.message_bus import MessageBus
@@ -91,16 +91,29 @@ async def main() -> None:
         max_retries=settings.ollama_max_retries,
         retry_base_delay=settings.ollama_retry_base_delay,
         max_concurrent=settings.ollama_max_concurrent,
+        keep_alive=settings.ollama_keep_alive,
     )
 
-    # Validate Ollama connection (model loads lazily on first request)
-    if not await ollama.health_check():
-        logger.error("Ollama is not reachable", url=settings.ollama_base_url)
+    # Wait for Ollama to be ready (handles profile-based startup ordering)
+    for attempt in range(1, 16):
+        if await ollama.health_check():
+            logger.info("Ollama connected, models will load on first use")
+            break
+        logger.warning("Ollama not ready yet", attempt=attempt, delay_seconds=2)
+        await asyncio.sleep(2)
+    else:
+        logger.error("Ollama is not reachable after retries", url=settings.ollama_base_url)
         await ollama.close()
         await bus.disconnect()
         await db.close()
         return
-    logger.info("Ollama connected, models will load on first use")
+
+    # Pre-flight hardware check — warn if models likely exceed VRAM/RAM
+    vram_warnings = check_hardware_fit(
+        settings.ollama_default_model, settings.ollama_coder_model
+    )
+    for warning in vram_warnings:
+        logger.warning("hardware_fit_warning", message=warning)
 
     # Initialize orchestration
     task_manager = TaskManager(db=db, bus=bus)

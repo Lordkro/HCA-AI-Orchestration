@@ -24,17 +24,6 @@ logger = structlog.get_logger()
 # Terminal states — a task in one of these is "finished" and never times out.
 _TERMINAL_STATES = frozenset({TaskState.DONE, TaskState.FAILED})
 
-# Active (non-terminal) states — tasks we should watch for stuck-ness.
-_ACTIVE_STATES = frozenset(
-    {
-        TaskState.PENDING,
-        TaskState.ASSIGNED,
-        TaskState.IN_PROGRESS,
-        TaskState.REVIEW,
-        TaskState.REVISION,
-    }
-)
-
 
 class Guardrails:
     """Safety controls to prevent runaway agent behavior.

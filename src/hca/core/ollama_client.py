@@ -259,6 +259,7 @@ class OllamaClient:
         max_retries: int = 3,
         retry_base_delay: float = 2.0,
         max_concurrent: int = 1,
+        keep_alive: str = "5m",
         circuit_breaker_failure_threshold: int = 5,
         circuit_breaker_recovery_timeout: float = 60.0,
         cache_maxsize: int = 256,
@@ -270,6 +271,7 @@ class OllamaClient:
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
         self.max_concurrent = max_concurrent
+        self.keep_alive = keep_alive
         self.circuit_breaker_failure_threshold = circuit_breaker_failure_threshold
         self.circuit_breaker_recovery_timeout = circuit_breaker_recovery_timeout
         self.stats = ClientStats()
@@ -670,12 +672,12 @@ class OllamaClient:
             "messages": messages,
             "stream": True,
             "think": False,
+            "keep_alive": self.keep_alive,
             "options": {
                 "temperature": temperature,
                 "top_p": top_p,
                 "num_predict": max_tokens,
                 "num_ctx": self.num_ctx,
-                "num_gpu": 20,
             },
         }
 
@@ -744,7 +746,7 @@ class OllamaClient:
     ) -> tuple[str, list[dict]]:
         """Chat completion with tool/function calling support.
 
-        Uses non-streaming mode (tools require ``stream: false``).
+        Uses streaming mode (per-chunk timeouts work better with slow GPUs).
         Returns (text_response, tool_calls) where tool_calls is a list
         of ``{"name": str, "arguments": dict}`` dicts.
 
@@ -789,8 +791,10 @@ class OllamaClient:
         payload: dict = {
             "model": model,
             "messages": messages,
-            "stream": False,
+            "stream": True,
             "tools": tools,
+            "keep_alive": self.keep_alive,
+            "think": False,
             "options": {
                 "temperature": temperature,
                 "top_p": top_p,
@@ -811,20 +815,20 @@ class OllamaClient:
         await self._acquire_concurrency_slot()
         try:
             start = time.monotonic()
-            response = await self._request_with_retry("POST", "/api/chat", json_data=payload)
+            text, final_data = await self._stream_collect(
+                "/api/chat", payload, content_key="message.content"
+            )
         finally:
             self._release_concurrency_slot()
         elapsed = time.monotonic() - start
-        data = response.json()
-
-        message = data.get("message", {})
-        text = message.get("content", "").strip()
 
         # Strip think blocks from text portion
         text = re.sub(r"<think>[\s\S]*?</think>\s*", "", text).strip()
 
-        # Extract tool calls
-        raw_calls = message.get("tool_calls", [])
+        # Extract tool calls from the final streaming chunk (done=true)
+        raw_calls = []
+        if final_data and "message" in final_data:
+            raw_calls = final_data["message"].get("tool_calls", [])
         tool_calls: list[dict] = []
         for call in raw_calls:
             func = call.get("function", {})
@@ -837,8 +841,8 @@ class OllamaClient:
                     raw_args = {}
             tool_calls.append({"name": name, "arguments": raw_args})
 
-        eval_count = data.get("eval_count", estimate_tokens(text))
-        prompt_eval_count = data.get("prompt_eval_count", input_tokens_est)
+        eval_count = final_data.get("eval_count", estimate_tokens(text)) if final_data else estimate_tokens(text)
+        prompt_eval_count = final_data.get("prompt_eval_count", input_tokens_est) if final_data else input_tokens_est
 
         stats = GenerationStats(
             model=model,
@@ -867,30 +871,6 @@ class OllamaClient:
             self._cache.put(cache_key, text, tool_calls)
 
         return text, tool_calls
-
-    async def preload_model(self, model: str | None = None) -> bool:
-        """Preload a model into memory for faster first inference.
-
-        Sends a minimal keep_alive request to force Ollama to load the model
-        weights without generating any tokens.  Uses a short timeout and no
-        retries so it doesn't block actual agent requests.
-        """
-        model = model or self.default_model
-        logger.info("preloading_model", model=model)
-        try:
-            await self._client.post(
-                "/api/generate",
-                json={
-                    "model": model,
-                    "keep_alive": "5m",
-                },
-                timeout=30.0,
-            )
-            logger.info("model_preloaded", model=model)
-            return True
-        except Exception as e:
-            logger.warning("model_preload_skipped", model=model, error=str(e))
-            return False
 
     # --------------------------------------------------------
     # Health & Diagnostics
