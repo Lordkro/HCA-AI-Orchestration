@@ -163,6 +163,10 @@ pub struct Task {
     pub description: String,
     /// Tasks that must be `Done` before this one can start.
     pub depends_on: Vec<TaskId>,
+    /// The role the planner intended the task for. The orchestrator assigns
+    /// it to this role unless a person steers it elsewhere.
+    #[serde(default)]
+    pub role: Option<AgentRole>,
     assignee: Option<AgentRole>,
     state: TaskState,
     revisions: u32,
@@ -188,6 +192,7 @@ impl Task {
             title: title.into(),
             description: description.into(),
             depends_on,
+            role: None,
             assignee: None,
             state: TaskState::Pending,
             revisions: 0,
@@ -197,6 +202,13 @@ impl Task {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Sets the planned role.
+    #[must_use]
+    pub fn with_role(mut self, role: AgentRole) -> Self {
+        self.role = Some(role);
+        self
     }
 
     /// The current state.

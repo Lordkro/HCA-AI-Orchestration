@@ -16,8 +16,9 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 proptest = "1"
 hca-core = { path = "crates/hca-core" }
+hca-llm = { path = "crates/hca-llm" }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
 tempfile = "3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 schemars = "1"

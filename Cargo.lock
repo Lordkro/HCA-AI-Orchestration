@@ -611,6 +611,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hca-agents"
+version = "0.2.0-alpha.0"
+dependencies = [
+ "chrono",
+ "hca-core",
+ "hca-llm",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "hca-core"
 version = "0.2.0-alpha.0"
 dependencies = [

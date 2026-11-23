@@ -9,8 +9,8 @@ The Rust rewrite of HCA Orchestration. It is built next to the Python version, w
 | `hca-core` | Domain types, task and project state machines, guardrails, scheduling. Pure logic, no I/O. | Done |
 | `hca-store` | SQLite storage with `sqlx`: projects, tasks, history and the job queue that replaces Redis | Done |
 | `hca-llm` | Providers: Ollama, Anthropic, OpenAI, Grok (xAI), any OpenAI-compatible server. Budget gate, context builder. | Done |
-| `hca-agents` | Agent loop, typed tools, role prompts | Next |
-| `hca-sandbox` | Per-project containers through `bollard` | Planned |
+| `hca-agents` | Agent loop, workspace tools, finishing tools, role prompts | Done |
+| `hca-sandbox` | Per-project containers through `bollard` | Next |
 | `hca-server` | `axum` API and WebSocket, compatible with today's dashboard | Planned |
 | `hca` | The binary | Planned |
 
@@ -67,6 +67,25 @@ max_tokens = 8192
 provider = "local"
 model = "qwen3:8b"
 ```
+
+## What `hca-agents` provides
+
+- **A real agent loop.** The model calls tools, sees their results and keeps going until it calls its finishing tool: `submit` (research, spec, coder), `submit_review` (critic) or `submit_plan` (PM). Python agents got one shot per message.
+- **Bounded runs.** A step limit (default 40), the project's token budget checked before every call (usage is reported after each call, so it's saved even if the run fails), and at most two reminders when the model stops without finishing.
+- **Mistakes go back to the model.** A bad path, invalid arguments, a non-unique edit or an invalid plan becomes an error result the model can fix. It never crashes the run.
+- **Tools per role:**
+
+  | Tool | PM | Research | Spec | Coder | Critic |
+  | --- | --- | --- | --- | --- | --- |
+  | `list_files`, `read_file` | yes | yes | yes | yes | yes |
+  | `write_file` | | yes | yes | yes | |
+  | `edit_file` | | | yes | yes | |
+  | `run_command` (sandbox only) | | | | yes | yes |
+
+  The critic can't write files. `run_command` only exists when a sandboxed runner is configured; nothing runs on the host.
+- **A safe workspace.** Paths must be relative, can't contain `..`, can't touch `.git/` (no planted hooks, no reading tokens from `.git/config`) and can't follow a symlink out of the project. Reads and writes have size limits.
+- **Checked handoffs.** A review that requests changes must say what to change. A plan is validated before it's accepted: dependencies must point at other tasks, with no cycles and within the task limit.
+- **Five rewritten prompts** in `hca-agents/prompts/`, each matching its role's tools.
 
 ## Working on it
 
