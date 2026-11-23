@@ -7,8 +7,8 @@ The Rust rewrite of HCA Orchestration. It is built next to the Python version, w
 | Crate | Purpose | State |
 | --- | --- | --- |
 | `hca-core` | Domain types, task and project state machines, guardrails, scheduling. Pure logic, no I/O. | Done |
-| `hca-store` | SQLite storage with `sqlx`, migrations, job table | Next |
-| `hca-llm` | Provider trait: Ollama, Anthropic, OpenAI-compatible. Context builder. | Planned |
+| `hca-store` | SQLite storage with `sqlx`: projects, tasks, history and the job queue that replaces Redis | Done |
+| `hca-llm` | Provider trait: Ollama, Anthropic, OpenAI-compatible. Context builder. | Next |
 | `hca-agents` | Agent loop, typed tools, role prompts | Planned |
 | `hca-sandbox` | Per-project containers through `bollard` | Planned |
 | `hca-server` | `axum` API and WebSocket, compatible with today's dashboard | Planned |
@@ -23,7 +23,15 @@ The Rust rewrite of HCA Orchestration. It is built next to the Python version, w
 - **Plans are validated before they run.** Empty plans, too many tasks, unknown or self dependencies and cycles are rejected.
 - **The orchestrator always knows what to do next.** `assess` returns `Running`, `NeedsRetry`, `Completed` or `Stuck`, never an open-ended retry.
 
-`tests/termination.rs` checks these with property tests over random task graphs, reviewer verdicts and agent crashes. It also has a regression test that replays the recorded Python loop.
+`hca-core/tests/termination.rs` checks these with property tests over random task graphs, reviewer verdicts and agent crashes. It also has a regression test that replays the recorded Python loop.
+
+## What `hca-store` guarantees
+
+- **One transaction per state change.** Loading a task, applying the core's rules, saving it and writing its history row commit together or not at all. Writes go through a single connection, so they never interleave.
+- **A refused event writes nothing.** Invalid transitions, invalid plans and work on inactive projects leave the database untouched.
+- **Jobs are leased, not lost.** A crashed worker's job is picked up again once its lease expires. A worker that lost its lease can't complete the job.
+- **Retries are bounded.** Every claim is an attempt. After `max_attempts` a job is dead and shows up for a person to requeue.
+- **Paused work waits; finished work stops.** Jobs of paused projects stay queued. When a project completes, fails or is cancelled, its jobs are cancelled in the same transaction. Spending the token budget does this too.
 
 ## Working on it
 

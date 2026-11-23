@@ -15,6 +15,10 @@ serde_json = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 proptest = "1"
+hca-core = { path = "crates/hca-core" }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tempfile = "3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
