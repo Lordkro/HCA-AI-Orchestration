@@ -8,8 +8,8 @@ The Rust rewrite of HCA Orchestration. It is built next to the Python version, w
 | --- | --- | --- |
 | `hca-core` | Domain types, task and project state machines, guardrails, scheduling. Pure logic, no I/O. | Done |
 | `hca-store` | SQLite storage with `sqlx`: projects, tasks, history and the job queue that replaces Redis | Done |
-| `hca-llm` | Provider trait: Ollama, Anthropic, OpenAI-compatible. Context builder. | Next |
-| `hca-agents` | Agent loop, typed tools, role prompts | Planned |
+| `hca-llm` | Providers: Ollama, Anthropic, OpenAI, Grok (xAI), any OpenAI-compatible server. Budget gate, context builder. | Done |
+| `hca-agents` | Agent loop, typed tools, role prompts | Next |
 | `hca-sandbox` | Per-project containers through `bollard` | Planned |
 | `hca-server` | `axum` API and WebSocket, compatible with today's dashboard | Planned |
 | `hca` | The binary | Planned |
@@ -32,6 +32,41 @@ The Rust rewrite of HCA Orchestration. It is built next to the Python version, w
 - **Jobs are leased, not lost.** A crashed worker's job is picked up again once its lease expires. A worker that lost its lease can't complete the job.
 - **Retries are bounded.** Every claim is an attempt. After `max_attempts` a job is dead and shows up for a person to requeue.
 - **Paused work waits; finished work stops.** Jobs of paused projects stay queued. When a project completes, fails or is cancelled, its jobs are cancelled in the same transaction. Spending the token budget does this too.
+
+## What `hca-llm` provides
+
+- **Five backends behind one trait:** Ollama, Anthropic, OpenAI, Grok and any OpenAI-compatible server (vLLM, LM Studio, OpenRouter). Grok goes through xAI's OpenAI-compatible Chat Completions API at `https://api.x.ai/v1`. xAI recommends its newer Responses API for new work; a client for it can be added behind the same trait.
+- **A model per role.** For example, Claude for planning, Grok for coding and a local Qwen for research. API keys are read from environment variables (`ANTHROPIC_API_KEY`, `XAI_API_KEY`, `OPENAI_API_KEY` by default), never from the config file. Only providers that a role uses need a key.
+- **Budget checked before the call.** `Llm::chat` estimates the worst case (everything sent plus the full output allowance) and refuses the call if the project's budget can't cover it.
+- **Typed tools.** `ToolSpec::of::<T>()` derives the JSON Schema from a Rust type, and `ToolCall::parse::<T>()` parses the model's arguments back into it. Arguments that aren't valid JSON are kept, so the agent can tell the model what went wrong.
+- **Retries where they help.** Network errors, 429s and 5xx responses are retried with backoff; other errors are returned at once.
+- **A context builder** in place of chat history. It assembles the task, the feedback, the test output (keeping the end, where errors are) and the files (keeping the start) within a token budget, and reports what it cut.
+- **A scripted provider** (`hca_llm::testing`) for testing agents without a model.
+
+```toml
+[providers.local]
+kind = "ollama"
+num_ctx = 16384
+
+[providers.claude]
+kind = "anthropic"
+
+[providers.grok]
+kind = "grok"
+
+[roles.pm]
+provider = "claude"
+model = "claude-opus-5-5"
+
+[roles.coder]
+provider = "grok"
+model = "grok-4"
+max_tokens = 8192
+
+[roles.research]
+provider = "local"
+model = "qwen3:8b"
+```
 
 ## Working on it
 

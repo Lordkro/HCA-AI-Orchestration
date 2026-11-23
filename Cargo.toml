@@ -19,6 +19,9 @@ hca-core = { path = "crates/hca-core" }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tempfile = "3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+schemars = "1"
+wiremock = "0.6"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
