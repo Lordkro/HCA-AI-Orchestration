@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ca71a8135906f4f7d9e17b05c2b7474159e4609203b076b533fa44631a743981 # shrinks to limits = Limits { max_revisions: 0, max_retries: 0, max_tasks: 50, max_parallel_tasks: 1, project_token_budget: 500000, task_timeout_minutes: 30 }, graph = [[]], verdicts = [false, false], crashes = [false, false]

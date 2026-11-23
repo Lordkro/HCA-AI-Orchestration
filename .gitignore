@@ -31,3 +31,6 @@ build/
 
 # uv lockfile (optional — deps managed via pyproject.toml)
 uv.lock
+
+# Rust
+/target/
