@@ -1,6 +1,6 @@
 [package]
 name = "hca"
-description = "HCA v2: an AI development team that plans, builds and reviews software."
+description = "HCA: an AI development team that plans, builds and reviews software."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

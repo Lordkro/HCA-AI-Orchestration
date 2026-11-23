@@ -1,39 +1,9 @@
-# Byte-compiled / optimized
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual environments
-.venv/
-venv/
-env/
-
-# Environment files
-.env
-
-# Database
-data/*.db
-data/*.db-shm
-data/*.db-wal
-.data/*.db
-.data/*.db-journal
-.data/logs/
-.data/cache/
-
-# Workspace generated files (tracked separately)
-.data/workspaces/*
-!.data/workspaces/.gitkeep
-
-# Distribution
-dist/
-build/
-*.egg-info/
-
-# uv lockfile (optional — deps managed via pyproject.toml)
-uv.lock
-
-# Rust
+# Build output
 /target/
 
-# Local HCA v2 config (copy of hca.example.toml)
+# Local configuration (copy of hca.example.toml) and secrets
 /hca.toml
+.env
+
+# Runtime data: database, access token, project workspaces
+/data/

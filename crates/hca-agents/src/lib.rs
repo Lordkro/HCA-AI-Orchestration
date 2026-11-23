@@ -1,11 +1,10 @@
-//! The HCA v2 agent loop, workspace tools and role prompts.
+//! The HCA agent loop, workspace tools and role prompts.
 //!
 //! An agent run is: a role's system prompt, a brief built by the
 //! orchestrator, and a loop of model calls and tool calls until the model
 //! calls its finishing tool (`submit`, `submit_review` or `submit_plan`).
-//! Unlike the Python version, agents see the results of their tools and can
-//! take as many steps as the task needs, within a step limit and the
-//! project's token budget.
+//! Agents see the results of their tools and can take as many steps as the
+//! task needs, within a step limit and the project's token budget.
 
 mod agent;
 mod runner;

@@ -1,4 +1,4 @@
--- HCA v2 initial schema.
+-- HCA initial schema.
 --
 -- Projects and tasks are stored as the JSON form of the hca-core types
 -- (`data`), plus the columns needed for querying. The state machines live
@@ -43,7 +43,7 @@ CREATE TABLE task_events (
 CREATE INDEX idx_task_events_task ON task_events (task_id, seq);
 CREATE INDEX idx_task_events_project ON task_events (project_id, seq);
 
--- Durable work queue. Replaces Redis Streams.
+-- Durable work queue.
 --
 -- A worker claims a job by taking a lease (`locked_by`, `locked_until`).
 -- If the worker dies, the lease expires and another worker can claim it.

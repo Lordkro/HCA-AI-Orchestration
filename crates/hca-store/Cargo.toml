@@ -1,6 +1,6 @@
 [package]
 name = "hca-store"
-description = "SQLite storage for HCA v2: projects, tasks, history and a durable job queue."
+description = "SQLite storage for HCA: projects, tasks, history and a durable job queue."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

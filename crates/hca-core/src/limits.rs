@@ -3,9 +3,6 @@
 use serde::{Deserialize, Serialize};
 
 /// Safety limits that bound how much work a project can ever do.
-///
-/// Defaults match the Python version's settings, plus a retry limit, which
-/// the Python version lacked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Limits {

@@ -127,8 +127,8 @@ impl Project {
 
     /// Whether agents may do work for this project right now.
     ///
-    /// Only `Active` projects accept work. The Python version only checked
-    /// for `paused`, so agents kept working on failed projects.
+    /// Only `Active` projects accept work: not paused ones, and not failed,
+    /// completed or cancelled ones.
     pub const fn accepts_work(&self) -> bool {
         matches!(self.status, ProjectStatus::Active)
     }
@@ -242,7 +242,6 @@ mod tests {
 
     #[test]
     fn spending_the_budget_fails_the_project() {
-        // The recorded Python run spent 190x its budget while agents kept going.
         let limits = Limits { project_token_budget: 1_000, ..Limits::default() };
         let mut p = project();
         assert!(p.charge_tokens(999, &limits, now()));

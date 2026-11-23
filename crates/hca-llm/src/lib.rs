@@ -1,4 +1,4 @@
-//! Model providers for HCA v2.
+//! Model providers for HCA.
 //!
 //! - One provider-neutral conversation format ([`ChatRequest`],
 //!   [`Message`], [`ToolSpec`], [`ChatResponse`]) and one trait,

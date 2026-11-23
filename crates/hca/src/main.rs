@@ -1,4 +1,4 @@
-//! `hca`: run the HCA v2 agent team.
+//! `hca`: run the HCA agent team.
 //!
 //! ```text
 //! hca init                 write hca.toml

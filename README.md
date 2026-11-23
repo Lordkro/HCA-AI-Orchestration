@@ -1,217 +1,168 @@
 # HCA Orchestration
 
-**Hybrid Cognitive Architecture — An Autonomous AI Development Team**
+**Hybrid Cognitive Architecture: an autonomous AI development team**
 
-[![Version](https://img.shields.io/github/v/tag/Lordkro/HCA-AI-Orchestration?label=version&logo=github)](https://github.com/Lordkro/HCA-AI-Orchestration/releases)
 [![CI](https://github.com/Lordkro/HCA-AI-Orchestration/actions/workflows/ci.yml/badge.svg)](https://github.com/Lordkro/HCA-AI-Orchestration/actions/workflows/ci.yml)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/Lordkro/HCA-AI-Orchestration/pkgs/container/hca-orchestration)
 [![License](https://img.shields.io/github/license/Lordkro/HCA-AI-Orchestration)](LICENSE)
 
-An AI agent team that takes your product ideas and builds them into working applications, powered by local LLMs via Ollama.
+A team of AI agents that turns a product idea into working code. A project manager plans the work, research, spec and coder agents carry it out, and a critic reviews every result, running the tests in a locked-down Docker sandbox. It's a single Rust binary with SQLite storage and a web dashboard, and it works with local models through Ollama or hosted ones from Anthropic, OpenAI and xAI (Grok).
 
-## v2 (Rust)
+## The team
 
-A Rust rewrite lives in [`crates/`](crates/README.md). It fixes the problems found in the review of this version: endless revision loops, unenforced token budgets, a reviewer that never saw the code, and an open API that could install packages on the server. It adds a real agent loop, a Docker sandbox for running tests, and model providers for Ollama, Anthropic, OpenAI and Grok. See [crates/README.md](crates/README.md) for the quick start.
+| Agent | What it does |
+| --- | --- |
+| **Project manager** | Breaks the idea into a task graph with dependencies |
+| **Research** | Investigates technologies, patterns and feasibility |
+| **Spec** | Writes technical specs, API contracts and data models |
+| **Coder** | Implements the code and runs it in the sandbox |
+| **Critic** | Reviews each result, runs the tests and approves or asks for changes |
 
-The Python version below is kept for reference until v2 replaces it. It has known security problems, including an API that's open by default, so don't run it where other machines can reach it.
+## Quick start
 
-## 🧠 The Team
+```sh
+# 1. Build
+cargo build --release -p hca
 
-| Agent | Role | What It Does |
-|-------|------|-------------|
-| 📋 **Project Manager** | Orchestrator | Breaks down ideas into tasks, assigns work, tracks progress |
-| 🔍 **Research Agent** | Analyst | Investigates technologies, patterns, and feasibility |
-| 📐 **Specification Agent** | Architect | Writes detailed technical specs, API contracts, data models |
-| 💻 **Coder Agent** | Engineer | Implements code based on specifications |
-| 🔎 **Critic Agent** | Reviewer | Reviews all outputs for quality and correctness |
+# 2. Build the sandbox image agents run code in (needs Docker)
+docker build -t hca-sandbox -f docker/sandbox.Dockerfile docker
 
-## 🚀 Quick Start
+# 3. Configure: pick a model for each role in the [llm] section
+./target/release/hca init
+export XAI_API_KEY=...        # only for the providers your roles use
+./target/release/hca check    # checks config, API keys and Docker
 
-### Prerequisites
-
-- [Docker](https://docs.docker.com/get-docker/) and Docker Compose v2+
-- At least 8 GB system RAM (16 GB+ recommended)
-- **No GPU required** — CPU mode works on any system; NVIDIA, AMD, Vulkan (any GPU), and Apple Silicon GPU profiles available
-
-### One-command setup (recommended)
-
-```bash
-git clone <repo-url> && cd HCA-Orchestration
-bash setup.sh
+# 4. Run, then open the link it prints (it includes the access token)
+./target/release/hca serve
 ```
 
-This auto-detects your GPU, copies `.env`, starts services, and pulls the recommended models.
-For NVIDIA GPUs, install the [container toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) first.
+`hca token` prints the dashboard link again. To run it with Docker Compose instead, follow the comments at the top of `docker-compose.yml`.
 
-**Options:**
+Without Docker, HCA still runs, but agents can't run commands or tests; reviewers then judge by reading the code.
 
-| Flag | Purpose |
-|------|---------|
-| `--profile nvidia` | Force NVIDIA profile (skip auto-detect) |
-| `--profile rocm` | Force AMD ROCm profile |
-| `--profile vulkan` | Force Vulkan GPU profile (AMD/Intel/any) |
-| `--profile metal` | Force Apple Silicon (Metal) profile |
-| `--models "llama3.2:3b qwen2.5-coder:3b"` | Pull different models |
-| `--skip-pull` | Skip model downloading |
+## Crates
 
-### Manual setup
+| Crate | Purpose |
+| --- | --- |
+| `hca-core` | Domain types, task and project state machines, guardrails, scheduling. Pure logic, no I/O. |
+| `hca-store` | SQLite storage with `sqlx`: projects, tasks, history, activity log and the job queue |
+| `hca-llm` | Providers: Ollama, Anthropic, OpenAI, Grok (xAI), any OpenAI-compatible server. Budget gate, context builder. |
+| `hca-agents` | Agent loop, workspace tools, finishing tools, role prompts |
+| `hca-sandbox` | Per-project Docker containers with no network and memory, CPU and process limits |
+| `hca-orchestrator` | Deterministic plan, work and review loop on the job queue |
+| `hca-server` | `axum` API, WebSocket and the dashboard, with sign-in |
+| `hca` | The binary: config, access token, startup, shutdown |
 
-<details>
-<summary>Click to expand manual steps</summary>
+## How a project runs
 
-#### 1. Choose your hardware profile
+1. You submit an idea. A **plan** job runs the PM agent, which submits a validated task graph.
+2. Each ready task gets a **work** job. Its agent (research, spec or coder) works until it submits.
+3. A **review** job runs the critic. Approval finishes the task; requested changes send it back to step 2 with the feedback.
+4. After every job, the orchestrator asks `hca-core` what to do next: dispatch ready tasks, retry failed ones that still have a retry, or finish the project as completed or stuck.
 
-| Profile | Command | Requirements |
-|---------|---------|--------------|
-| **CPU** (default) | `docker compose up` | No GPU needed |
-| **NVIDIA GPU** | `docker compose --profile nvidia up` | [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) |
-| **AMD ROCm** | `docker compose --profile rocm up` | AMD GPU with ROCm driver |
-| **Vulkan (any GPU)** | `docker compose --profile vulkan up` | Any GPU with Vulkan driver (recommended fallback) |
-| **Apple Metal** | `docker compose --profile metal up` | Apple Silicon (M-series) Mac |
+Routing is plain code: no model decides where work goes. Each state change and the job that follows it are saved in one transaction, so a crash can't strand a task. On restart, `recover` re-queues anything that lost its job. People can pause, resume or cancel a project, approve or reject work in review, add notes to a task, and retry a failed task from the dashboard.
 
-#### 2. Pick the right model for your VRAM
+## What `hca-core` guarantees
 
-| VRAM | Recommended default | Recommended coder |
-|------|-------------------|-------------------|
-| ≥24 GB | `qwen3:14b` | `qwen2.5-coder:14b` |
-| 12-24 GB | `qwen3:8b` | `qwen2.5-coder:7b` |
-| 8-12 GB | `llama3.2:3b` | `qwen2.5-coder:3b` |
-| 6-8 GB | `phi-4:latest` | `phi-4:latest` |
-| <6 GB | `llama3.2:1b` | `qwen2.5-coder:1.5b` |
+- **Every project ends.** A task allows at most `max_revisions` revision rounds per attempt and `max_retries` retries. Both counters are private to the state machine, so callers can't skip them.
+- **Revisions can always continue.** A revision goes back through `InProgress` to `Review`. Review and revision can't deadlock or loop forever.
+- **Only active projects accept work.** Paused, failed, completed and cancelled projects don't.
+- **Budgets are checked before a model call.** `TokenBudget::authorize` refuses a call once the budget is spent or too small.
+- **Plans are validated before they run.** Empty plans, too many tasks, unknown or self dependencies and cycles are rejected.
+- **The orchestrator always knows what to do next.** `assess` returns `Running`, `NeedsRetry`, `Completed` or `Stuck`, never an open-ended retry.
 
-#### 3. Configure
+`hca-core/tests/termination.rs` checks these with property tests over random task graphs, reviewer verdicts and agent crashes. A regression test replays a long review-and-revise loop and checks that it stops at the limit.
 
-```bash
-cp .env.example .env
-# Edit OLLAMA_DEFAULT_MODEL and OLLAMA_CODER_MODEL for your VRAM
+## What `hca-store` guarantees
+
+- **One transaction per state change.** Loading a task, applying the core's rules, saving it and writing its history row commit together or not at all. Writes go through a single connection, so they never interleave.
+- **A refused event writes nothing.** Invalid transitions, invalid plans and work on inactive projects leave the database untouched.
+- **Jobs are leased, not lost.** A crashed worker's job is picked up again once its lease expires. A worker that lost its lease can't complete the job.
+- **Retries are bounded.** Every claim is an attempt. After `max_attempts` a job is dead and shows up for a person to requeue.
+- **Paused work waits; finished work stops.** Jobs of paused projects stay queued. When a project completes, fails or is cancelled, its jobs are cancelled in the same transaction. Spending the token budget does this too.
+
+## What `hca-llm` provides
+
+- **Five backends behind one trait:** Ollama, Anthropic, OpenAI, Grok and any OpenAI-compatible server (vLLM, LM Studio, OpenRouter). Grok goes through xAI's OpenAI-compatible Chat Completions API at `https://api.x.ai/v1`. xAI recommends its newer Responses API for new work; a client for it can be added behind the same trait.
+- **A model per role.** For example, Claude for planning, Grok for coding and a local Qwen for research. API keys are read from environment variables (`ANTHROPIC_API_KEY`, `XAI_API_KEY`, `OPENAI_API_KEY` by default), never from the config file. Only providers that a role uses need a key.
+- **Budget checked before the call.** `Llm::chat` estimates the worst case (everything sent plus the full output allowance) and refuses the call if the project's budget can't cover it.
+- **Typed tools.** `ToolSpec::of::<T>()` derives the JSON Schema from a Rust type, and `ToolCall::parse::<T>()` parses the model's arguments back into it. Arguments that aren't valid JSON are kept, so the agent can tell the model what went wrong.
+- **Retries where they help.** Network errors, 429s and 5xx responses are retried with backoff; other errors are returned at once.
+- **A context builder** in place of chat history. It assembles the task, the feedback, the test output (keeping the end, where errors are) and the files (keeping the start) within a token budget, and reports what it cut.
+- **A scripted provider** (`hca_llm::testing`) for testing agents without a model.
+
+```toml
+[llm.providers.local]
+kind = "ollama"
+num_ctx = 16384
+
+[llm.providers.claude]
+kind = "anthropic"
+
+[llm.providers.grok]
+kind = "grok"
+
+[llm.roles.pm]
+provider = "claude"
+model = "claude-opus-5-5"
+
+[llm.roles.coder]
+provider = "grok"
+model = "grok-4"
+max_tokens = 8192
+
+[llm.roles.research]
+provider = "local"
+model = "qwen3:8b"
 ```
 
-#### 4. Start and pull models
+## What `hca-agents` provides
 
-```bash
-docker compose up -d ollama
-docker compose exec ollama ollama pull qwen3:14b
-docker compose exec ollama ollama pull qwen2.5-coder:14b
-docker compose up -d
+- **A real agent loop.** The model calls tools, sees their results and keeps going until it calls its finishing tool: `submit` (research, spec, coder), `submit_review` (critic) or `submit_plan` (PM).
+- **Bounded runs.** A step limit (default 40), the project's token budget checked before every call (usage is reported after each call, so it's saved even if the run fails), and at most two reminders when the model stops without finishing.
+- **Mistakes go back to the model.** A bad path, invalid arguments, a non-unique edit or an invalid plan becomes an error result the model can fix. It never crashes the run.
+- **Tools per role:**
+
+  | Tool | PM | Research | Spec | Coder | Critic |
+  | --- | --- | --- | --- | --- | --- |
+  | `list_files`, `read_file` | yes | yes | yes | yes | yes |
+  | `write_file` | | yes | yes | yes | |
+  | `edit_file` | | | yes | yes | |
+  | `run_command` (sandbox only) | | | | yes | yes |
+
+  The critic can't write files. `run_command` only exists when a sandboxed runner is configured; nothing runs on the host.
+- **A safe workspace.** Paths must be relative, can't contain `..`, can't touch `.git/` (no planted hooks, no reading tokens from `.git/config`) and can't follow a symlink out of the project. Reads and writes have size limits.
+- **Checked handoffs.** A review that requests changes must say what to change. A plan is validated before it's accepted: dependencies must point at other tasks, with no cycles and within the task limit.
+- **Five role prompts** in `hca-agents/prompts/`, each matching its role's tools.
+
+## What `hca-sandbox` guarantees
+
+Each project gets one long-lived container with only its workspace mounted. Commands run inside it with `docker exec`. Checked against a real Docker daemon:
+
+- **No network** by default.
+- **Limits:** 2 GiB of memory with no extra swap, 2 CPUs and 256 processes by default. A fork bomb hits the process limit, and a 3 GiB allocation fails.
+- **Locked down:** read-only root filesystem with a small writable `/tmp`, all Linux capabilities dropped, `no-new-privileges`, non-root user.
+- **Timeouts stop runaway commands** by killing the container; the next command gets a fresh one.
+- **No Docker CLI or socket needed in the HCA container:** it talks to the Docker API, through a proxy that only allows container and exec calls in the Compose setup.
+
+## What `hca-server` guarantees
+
+- **Sign-in required.** Every API call and the WebSocket need the access token. It's generated on first run, stored with owner-only permissions in the data folder, and printed as a dashboard link. The dashboard keeps it in the browser and removes it from the address bar.
+- **Other websites can't use your session.** There are no CORS headers, and WebSocket connections from another origin are refused.
+- **Local by default.** The server binds to `127.0.0.1`. The Compose file publishes the port on `127.0.0.1` only.
+- **Built-in dashboard.** It's compiled into the binary, so there's nothing else to serve. Artifact names are escaped before they're shown.
+
+## Contributing
+
+```sh
+cargo test                                   # all tests
+cargo test -p hca-sandbox -- --ignored       # also the real-Docker sandbox test
+cargo clippy --all-targets -- -D warnings    # pedantic lints are on
+cargo fmt --all
 ```
 
-#### 5. Open dashboard
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the conventions.
 
-Navigate to [http://localhost:8080](http://localhost:8080).
-</details>
+## License
 
-## 📚 Documentation
-
-| Guide | Description |
-|---|---|
-| [Architecture](docs/ARCHITECTURE.md) | System architecture, data flow, state machine, schema, security |
-| [User Guide](docs/USER_GUIDE.md) | Step-by-step setup and usage guide |
-| [Contributing](CONTRIBUTING.md) | Development setup, tests, code style, adding agents |
-| [Prompt Cookbook](docs/PROMPT_COOKBOOK.md) | Prompt engineering reference and best practices |
-| [Workspace Management](WORKSPACE_MANAGEMENT.md) | Workspace lifecycle, retention, git integration |
-
-## 🏗️ Architecture
-
-```
-┌─────────────────────────────────────────┐
-│           Web Dashboard (UI)            │
-│        FastAPI + WebSocket + HTML       │
-└──────────────────┬──────────────────────┘
-                   │ REST / WebSocket
-┌──────────────────▼──────────────────────┐
-│          Orchestrator Service           │
-│     (Agents + Pipeline + Task Mgmt)     │
-└──────────────────┬──────────────────────┘
-                   │ Redis Streams
-          ┌────────┼────────┐
-          ▼        ▼        ▼
-     ┌────────┐┌────────┐┌────────┐
-     │Agent 1 ││Agent 2 ││Agent N │
-     └───┬────┘└───┬────┘└───┬────┘
-         └─────────┼─────────┘
-                   ▼
-            ┌────────────┐
-            │   Ollama   │
-            │ (LLM API)  │
-            └────────────┘
-```
-
-## 📁 Project Structure
-
-```
-HCA-Orchestration/
-├── docs/                   # Documentation
-│   ├── ARCHITECTURE.md     # Full system architecture
-│   ├── USER_GUIDE.md       # End-user guide
-│   └── PROMPT_COOKBOOK.md  # Prompt engineering reference
-├── src/
-│   └── hca/                # Main package (hca namespace)
-│       ├── main.py         # Application entrypoint
-│       ├── core/           # Shared infrastructure
-│       │   ├── config.py       # Settings from env vars
-│       │   ├── database.py     # SQLite persistence
-│       │   ├── logger.py       # Structured logging
-│       │   ├── message_bus.py  # Redis Streams
-│       │   ├── metrics.py      # Prometheus metrics
-│       │   ├── models.py       # Pydantic data models
-│       │   ├── ollama_client.py# Ollama API wrapper
-│       │   └── tools.py        # Tool definitions + validation
-│       ├── agents/         # Agent implementations
-│       │   ├── base_agent.py   # Abstract base class
-│       │   ├── pm_agent.py     # Project Manager
-│       │   ├── research_agent.py
-│       │   ├── spec_agent.py
-│       │   ├── coder_agent.py
-│       │   └── critic_agent.py
-│       ├── orchestrator/   # Workflow engine
-│       │   ├── guardrails.py
-│       │   ├── pipeline.py
-│       │   ├── sandbox.py
-│       │   ├── task_manager.py
-│       │   └── workspace_manager.py
-│       ├── api/            # Web API + UI
-│       │   ├── app.py
-│       │   ├── routes/
-│       │   │   ├── agents.py
-│       │   │   ├── dead_letter.py
-│       │   │   ├── hitl.py
-│       │   │   ├── projects.py
-│       │   │   ├── tasks.py
-│       │   │   └── websocket.py
-│       │   └── static/
-│       └── prompts/        # System prompts per agent
-├── tests/                  # Test suite
-│   ├── conftest.py         # Shared mock fixtures
-│   ├── unit/               # Unit tests
-│   └── integration/        # Integration tests
-├── scripts/                # Utility scripts
-├── .data/                  # Runtime data (git-ignored)
-│   ├── workspaces/         # Generated project files
-│   ├── logs/               # Application logs
-│   └── cache/              # Runtime cache
-├── CONTRIBUTING.md
-├── WORKSPACE_MANAGEMENT.md
-├── LICENSE                 # MIT License
-├── docker-compose.yml      # All services
-├── Dockerfile              # Python app image
-├── pyproject.toml          # Dependencies & build config
-├── setup.sh                # One-command setup script
-├── .dockerignore
-└── .env.example            # Configuration template
-```
-
-## ⚙️ Configuration
-
-All settings are in `.env`. Key options:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OLLAMA_DEFAULT_MODEL` | `qwen3:14b` | Model for PM, Research, Spec, Critic agents |
-| `OLLAMA_CODER_MODEL` | `qwen2.5-coder:14b` | Model for the Coder agent |
-| `MAX_ITERATIONS_PER_TASK` | `5` | Max revision cycles |
-| `TASK_TIMEOUT_MINUTES` | `30` | Timeout per task |
-| `WEB_PORT` | `8080` | Dashboard port |
-
-## 📄 License
-
-MIT
+MIT, see [LICENSE](LICENSE).

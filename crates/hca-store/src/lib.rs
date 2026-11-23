@@ -1,11 +1,10 @@
-//! SQLite storage for HCA v2.
+//! SQLite storage for HCA.
 //!
-//! One file holds everything: projects, tasks, the task history and the job
-//! queue that replaces Redis Streams. Every state change runs in a single
+//! One file holds everything: projects, tasks, the task history, the
+//! activity log and the job queue. Every state change runs in a single
 //! transaction through a **single writer connection**, so two coroutines
-//! can never interleave half-finished writes (a problem in the Python
-//! version, which shared one connection with no transactions). Reads go
-//! through a separate pool and see the last committed state.
+//! can never interleave half-finished writes. Reads go through a separate
+//! pool and see the last committed state.
 //!
 //! The store never decides a state change itself: it loads the
 //! [`hca_core`] type, applies the event with the core's rules, and saves

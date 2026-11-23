@@ -157,8 +157,8 @@ async fn an_idea_goes_from_plan_to_done() {
 
 #[tokio::test]
 async fn an_endlessly_unhappy_critic_cannot_burn_the_budget() {
-    // The recorded Python run: 1,940 cycles, 95 million tokens. Here the
-    // task fails after its revisions and retry, and the project stops.
+    // The task fails after its revisions and retry, and the project stops
+    // instead of looping and spending tokens forever.
     let mut coder = ScriptedProvider::new();
     let mut critic = ScriptedProvider::new();
     for _ in 0..50 {

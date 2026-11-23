@@ -1,8 +1,8 @@
 //! Property tests: whatever the agents and reviewers do, work always ends.
 //!
-//! The Python version ran one task through 1,940 revision cycles and 95
-//! million tokens. These tests pin down the guarantees that make that
-//! impossible in v2.
+//! A reviewer that never approves, or an orchestrator that keeps retrying,
+//! must not be able to keep a task running and spending tokens forever.
+//! These tests pin down the guarantees that make that impossible.
 
 use chrono::{DateTime, Duration, Utc};
 use hca_core::{
@@ -130,9 +130,8 @@ proptest! {
     }
 }
 
-/// Regression test for the recorded Python run: a reviewer that always asks
-/// for a revision. The task must fail after its revisions and retries are
-/// used up, instead of looping 1,940 times.
+/// A reviewer that always asks for a revision. The task must fail after its
+/// revisions and retries are used up, instead of looping forever.
 #[test]
 fn an_endlessly_unhappy_reviewer_cannot_loop_forever() {
     let limits = Limits::default();
@@ -151,7 +150,7 @@ fn an_endlessly_unhappy_reviewer_cannot_loop_forever() {
             break;
         }
         steps += 1;
-        assert!(steps < 1_940, "looped like the Python version");
+        assert!(steps <= Task::max_events(&limits), "looped past the limits");
     }
     assert_eq!(task.state(), TaskState::Failed);
     assert_eq!(task.failure(), Some(&FailureReason::RevisionLimit));

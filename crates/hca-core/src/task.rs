@@ -12,7 +12,7 @@
 //!
 //! State only changes through [`Task::apply`]. Counters are private, so the
 //! revision and retry limits can't be skipped by a caller that forgets to
-//! increment them, which is how the Python version looped forever.
+//! increment them.
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn revision_goes_back_through_in_progress() {
-        // Bug 1 in the review: the Python version had no way out of REVISION.
+        // A revision must lead back to review; otherwise the task is stuck.
         let limits = Limits::default();
         let mut t = task();
         drive(
@@ -429,7 +429,7 @@ mod tests {
 
     #[test]
     fn blank_feedback_is_refused() {
-        // The recorded Python loop passed empty feedback back and forth.
+        // Empty feedback gives the agent nothing to fix.
         let limits = Limits::default();
         let mut t = task();
         drive(
@@ -524,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn states_serialize_like_the_python_api() {
+    fn states_serialize_like_the_dashboard_expects() {
         let json = serde_json::to_string(&TaskState::InProgress).unwrap();
         assert_eq!(json, "\"in_progress\"");
     }

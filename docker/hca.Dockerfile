@@ -1,4 +1,4 @@
-# HCA v2 image: one static-ish binary, no Python, no shell tools needed.
+# HCA image: one binary on a minimal base, no shell or package manager.
 # Build from the repository root:
 #   docker build -t hca -f docker/hca.Dockerfile .
 

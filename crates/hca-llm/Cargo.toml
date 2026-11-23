@@ -1,6 +1,6 @@
 [package]
 name = "hca-llm"
-description = "Model providers for HCA v2: Ollama, Anthropic, OpenAI-compatible and Grok, plus a budget gate and context builder."
+description = "Model providers for HCA: Ollama, Anthropic, OpenAI-compatible and Grok, plus a budget gate and context builder."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

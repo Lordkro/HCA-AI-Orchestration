@@ -4,7 +4,7 @@
 //!
 //! - relative only: no absolute paths, no `..`;
 //! - never inside `.git/`, so an agent can't plant a git hook or read a
-//!   token from `.git/config` (both possible in the Python version);
+//!   token from `.git/config`;
 //! - no symlink that leads out of the folder;
 //! - size limits on reads and writes.
 

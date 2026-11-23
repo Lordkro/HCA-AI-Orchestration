@@ -1,4 +1,4 @@
-//! The durable job queue that replaces Redis Streams.
+//! The durable job queue.
 //!
 //! - **At-least-once with leases.** A worker claims a job for a lease
 //!   period. If it crashes, the lease expires and another worker can claim

@@ -88,6 +88,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: docker/hca.Dockerfile
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:${{ needs.release.outputs.version }}

@@ -1,6 +1,6 @@
 [package]
 name = "hca-core"
-description = "Domain types, state machines and guardrails for HCA v2. Pure logic, no I/O."
+description = "Domain types, state machines and guardrails for HCA. Pure logic, no I/O."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

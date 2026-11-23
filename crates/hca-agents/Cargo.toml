@@ -1,6 +1,6 @@
 [package]
 name = "hca-agents"
-description = "The HCA v2 agent loop, workspace tools and role prompts."
+description = "The HCA agent loop, workspace tools and role prompts."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

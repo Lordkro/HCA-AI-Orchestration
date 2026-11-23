@@ -1,9 +1,6 @@
-//! HTTP API, WebSocket and dashboard for HCA v2.
+//! HTTP API, WebSocket and dashboard for HCA.
 //!
-//! The API keeps the shape the existing dashboard expects, so the same
-//! dashboard runs on v2 with small changes (sign-in, and an XSS fix).
-//!
-//! Security defaults, all fixing problems in the Python version:
+//! Security defaults:
 //!
 //! - **Every API call needs the access token** (`Authorization: Bearer`),
 //!   and so does the WebSocket (`?token=`). Only the dashboard's static

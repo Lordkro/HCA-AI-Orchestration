@@ -1,4 +1,4 @@
-//! The HCA v2 orchestrator.
+//! The HCA orchestrator.
 //!
 //! Routing is plain code, not a model. A project moves through three kinds
 //! of job on the durable queue:

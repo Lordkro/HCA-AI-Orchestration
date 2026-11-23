@@ -71,7 +71,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wire_names_match_the_python_api() {
+    fn wire_names_match_the_dashboard() {
         for role in AgentRole::ALL {
             let json = serde_json::to_string(&role).unwrap();
             assert_eq!(json, format!("\"{}\"", role.as_str()));

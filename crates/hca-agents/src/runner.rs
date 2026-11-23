@@ -1,9 +1,9 @@
 //! Running commands for agents.
 //!
-//! The agent crate defines the interface; the sandbox crate will implement
-//! it with an isolated, resource-limited container per project. Nothing
-//! here runs commands on the host, so the Python version's
-//! `pip install` on the orchestrator itself can't be repeated.
+//! The agent crate defines the interface; `hca-sandbox` implements it with
+//! an isolated, resource-limited container per project. Nothing here runs
+//! commands on the host, so agents can never change the machine HCA runs
+//! on.
 
 use std::path::Path;
 use std::time::Duration;

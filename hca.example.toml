@@ -1,4 +1,4 @@
-# HCA v2 configuration.
+# HCA configuration.
 #
 # API keys never go in this file. Each cloud provider reads its key from an
 # environment variable (shown below), so this file is safe to commit.

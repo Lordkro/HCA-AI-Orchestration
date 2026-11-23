@@ -1,4 +1,4 @@
-//! Core domain logic for HCA v2.
+//! Core domain logic for HCA.
 //!
 //! This crate holds the rules of the system and nothing else: no database,
 //! no network, no clock. Every function that needs the current time takes it
@@ -14,9 +14,6 @@
 //!   budget is spent.
 //! - [`assess`] tells the orchestrator when a project is complete or stuck,
 //!   instead of retrying failed tasks forever.
-//!
-//! These rules close the loop that let the Python version spend 95 million
-//! tokens on 1,940 revision cycles of one task.
 
 mod budget;
 mod ids;

@@ -1,6 +1,6 @@
 [package]
 name = "hca-server"
-description = "HTTP API, WebSocket and dashboard for HCA v2."
+description = "HTTP API, WebSocket and dashboard for HCA."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

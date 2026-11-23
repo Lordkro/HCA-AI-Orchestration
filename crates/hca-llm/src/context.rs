@@ -1,7 +1,7 @@
 //! Builds a prompt from the pieces an agent needs, within a token budget.
 //!
-//! This replaces the Python version's approach of replaying the last 40 raw
-//! prompts. Each call gets a fresh, focused prompt: the task, the reviewer's
+//! Instead of replaying raw chat history, each call gets a fresh, focused
+//! prompt: the task, the reviewer's
 //! feedback, the latest test output, the file tree and the relevant files.
 //! When everything doesn't fit, lower-priority sections are cut or dropped
 //! first, and the result says what was left out.
