@@ -9,6 +9,12 @@
 
 An AI agent team that takes your product ideas and builds them into working applications, powered by local LLMs via Ollama.
 
+## v2 (Rust)
+
+A Rust rewrite lives in [`crates/`](crates/README.md). It fixes the problems found in the review of this version: endless revision loops, unenforced token budgets, a reviewer that never saw the code, and an open API that could install packages on the server. It adds a real agent loop, a Docker sandbox for running tests, and model providers for Ollama, Anthropic, OpenAI and Grok. See [crates/README.md](crates/README.md) for the quick start.
+
+The Python version below is kept for reference until v2 replaces it. It has known security problems, including an API that's open by default, so don't run it where other machines can reach it.
+
 ## 🧠 The Team
 
 | Agent | Role | What It Does |

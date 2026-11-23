@@ -1,0 +1,35 @@
+[package]
+name = "hca"
+description = "HCA v2: an AI development team that plans, builds and reviews software."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hca"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+hca-agents.workspace = true
+hca-core.workspace = true
+hca-llm.workspace = true
+hca-orchestrator.workspace = true
+hca-sandbox.workspace = true
+hca-server.workspace = true
+hca-store.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["signal", "net"] }
+toml = "0.8"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

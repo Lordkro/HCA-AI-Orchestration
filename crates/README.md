@@ -1,18 +1,50 @@
 # HCA v2 (Rust)
 
-The Rust rewrite of HCA Orchestration. It is built next to the Python version, which stays in `src/` until v2 reaches parity.
+The Rust rewrite of HCA Orchestration. It runs next to the Python version, which stays in `src/` until v2 replaces it.
+
+## Quick start
+
+```sh
+# 1. Build
+cargo build --release -p hca
+
+# 2. Build the sandbox image agents run code in (needs Docker)
+docker build -t hca-sandbox -f docker/sandbox.Dockerfile docker
+
+# 3. Configure: pick a model for each role in the [llm] section
+./target/release/hca init
+export XAI_API_KEY=...        # only for the providers your roles use
+./target/release/hca check    # checks config, API keys and Docker
+
+# 4. Run, then open the link it prints (it includes the access token)
+./target/release/hca serve
+```
+
+`hca token` prints the dashboard link again. With Docker Compose, see the comments at the top of `docker-compose.v2.yml`.
+
+Without Docker, HCA still runs, but agents can't run commands or tests; reviewers then judge by reading the code.
 
 ## Status
 
 | Crate | Purpose | State |
 | --- | --- | --- |
 | `hca-core` | Domain types, task and project state machines, guardrails, scheduling. Pure logic, no I/O. | Done |
-| `hca-store` | SQLite storage with `sqlx`: projects, tasks, history and the job queue that replaces Redis | Done |
+| `hca-store` | SQLite storage with `sqlx`: projects, tasks, history, activity log and the job queue that replaces Redis | Done |
 | `hca-llm` | Providers: Ollama, Anthropic, OpenAI, Grok (xAI), any OpenAI-compatible server. Budget gate, context builder. | Done |
 | `hca-agents` | Agent loop, workspace tools, finishing tools, role prompts | Done |
-| `hca-sandbox` | Per-project containers through `bollard` | Next |
-| `hca-server` | `axum` API and WebSocket, compatible with today's dashboard | Planned |
-| `hca` | The binary | Planned |
+| `hca-sandbox` | Per-project Docker containers with no network and memory, CPU and process limits | Done |
+| `hca-orchestrator` | Deterministic plan, work and review loop on the job queue | Done |
+| `hca-server` | `axum` API, WebSocket and the dashboard, with sign-in | Done |
+| `hca` | The binary: config, access token, startup, shutdown | Done |
+
+## How a project runs
+
+1. You submit an idea. A **plan** job runs the PM agent, which submits a validated task graph.
+2. Each ready task gets a **work** job. Its agent (research, spec or coder) works until it submits.
+3. A **review** job runs the critic. Approval finishes the task; requested changes send it back to step 2 with the feedback.
+4. After every job, the orchestrator asks `hca-core` what to do next: dispatch ready tasks, retry failed ones that still have a retry, or finish the project as completed or stuck.
+
+Routing is plain code: no model decides where work goes. Each state change and the job that follows it are saved in one transaction, so a crash can't strand a task. On restart, `recover` re-queues anything that lost its job. People can pause, resume or cancel a project, approve or reject work in review, add notes to a task, and retry a failed task from the dashboard.
 
 ## What `hca-core` guarantees
 
@@ -87,10 +119,28 @@ model = "qwen3:8b"
 - **Checked handoffs.** A review that requests changes must say what to change. A plan is validated before it's accepted: dependencies must point at other tasks, with no cycles and within the task limit.
 - **Five rewritten prompts** in `hca-agents/prompts/`, each matching its role's tools.
 
+## What `hca-sandbox` guarantees
+
+Each project gets one long-lived container with only its workspace mounted. Commands run inside it with `docker exec`. Checked against a real Docker daemon:
+
+- **No network** by default.
+- **Limits:** 2 GiB of memory with no extra swap, 2 CPUs and 256 processes by default. A fork bomb hits the process limit, and a 3 GiB allocation fails.
+- **Locked down:** read-only root filesystem with a small writable `/tmp`, all Linux capabilities dropped, `no-new-privileges`, non-root user.
+- **Timeouts stop runaway commands** by killing the container; the next command gets a fresh one.
+- **No Docker CLI or socket needed in the HCA container:** it talks to the Docker API, through a proxy that only allows container and exec calls in the Compose setup.
+
+## What `hca-server` guarantees
+
+- **Sign-in required.** Every API call and the WebSocket need the access token. It's generated on first run, stored with owner-only permissions in the data folder, and printed as a dashboard link. The dashboard keeps it in the browser and removes it from the address bar.
+- **Other websites can't use your session.** There are no CORS headers, and WebSocket connections from another origin are refused.
+- **Local by default.** The server binds to `127.0.0.1`. The Compose file publishes the port on `127.0.0.1` only.
+- **Same dashboard.** The API keeps the shape the existing dashboard reads. The dashboard gets sign-in and a fix for the artifact-name XSS.
+
 ## Working on it
 
 ```sh
-cargo test                                   # unit + property tests
+cargo test                                   # all tests
+cargo test -p hca-sandbox -- --ignored       # also the real-Docker sandbox test
 cargo clippy --all-targets -- -D warnings    # pedantic lints are on
 cargo fmt --all
 ```

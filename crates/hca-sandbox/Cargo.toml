@@ -1,0 +1,22 @@
+[package]
+name = "hca-sandbox"
+description = "Isolated, resource-limited Docker containers for running agent commands."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bollard = "0.19"
+futures-util = "0.3"
+hca-agents.workspace = true
+hca-llm.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

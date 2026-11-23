@@ -22,7 +22,7 @@ use crate::{AgentRole, Limits, ProjectId, TaskId};
 /// Where a task is in its lifecycle.
 ///
 /// Serialized in `snake_case` to match the existing dashboard.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
     /// Waiting for its dependencies or for a free slot.

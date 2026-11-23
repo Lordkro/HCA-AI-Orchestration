@@ -34,3 +34,6 @@ uv.lock
 
 # Rust
 /target/
+
+# Local HCA v2 config (copy of hca.example.toml)
+/hca.toml

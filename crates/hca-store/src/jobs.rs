@@ -136,22 +136,9 @@ impl Store {
         if project.status().is_terminal() {
             return Err(StoreError::ProjectNotActive(project.status()));
         }
-        let id: i64 = sqlx::query_scalar(
-            "INSERT INTO jobs (project_id, task_id, kind, payload, status, attempts, max_attempts, \
-             run_after, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?) RETURNING id",
-        )
-        .bind(job.project_id.to_string())
-        .bind(job.task_id.map(|t| t.to_string()))
-        .bind(&job.kind)
-        .bind(serde_json::to_string(&job.payload)?)
-        .bind(i64::from(job.max_attempts.max(1)))
-        .bind(time::encode(job.run_after))
-        .bind(time::encode(now))
-        .bind(time::encode(now))
-        .fetch_one(&mut *tx)
-        .await?;
+        let id = insert_job(&mut tx, job, now).await?;
         tx.commit().await?;
-        Ok(JobId(id))
+        Ok(id)
     }
 
     /// Claims the oldest runnable job of one of `kinds` (any kind if empty)
@@ -371,17 +358,43 @@ impl Store {
     }
 }
 
-/// Cancels a project's queued and running jobs. Runs inside the caller's
-/// transaction so it commits together with the project's final status.
+/// Inserts a queued job inside the caller's transaction.
+pub(crate) async fn insert_job(
+    tx: &mut Transaction<'_, Sqlite>,
+    job: &NewJob,
+    now: DateTime<Utc>,
+) -> Result<JobId> {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO jobs (project_id, task_id, kind, payload, status, attempts, max_attempts, \
+         run_after, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?) RETURNING id",
+    )
+    .bind(job.project_id.to_string())
+    .bind(job.task_id.map(|t| t.to_string()))
+    .bind(&job.kind)
+    .bind(serde_json::to_string(&job.payload)?)
+    .bind(i64::from(job.max_attempts.max(1)))
+    .bind(time::encode(job.run_after))
+    .bind(time::encode(now))
+    .bind(time::encode(now))
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(JobId(id))
+}
+
+/// Cancels a project's queued jobs, and its running jobs too if
+/// `include_running`. Runs inside the caller's transaction so it commits
+/// together with the project's final status.
 pub(crate) async fn cancel_for_project(
     tx: &mut Transaction<'_, Sqlite>,
     project_id: ProjectId,
+    include_running: bool,
     now: DateTime<Utc>,
 ) -> Result<u64> {
-    let result = sqlx::query(
+    let statuses = if include_running { "('queued', 'running')" } else { "('queued')" };
+    let result = sqlx::query(&format!(
         "UPDATE jobs SET status = 'cancelled', locked_by = NULL, locked_until = NULL, updated_at = ? \
-         WHERE project_id = ? AND status IN ('queued', 'running')",
-    )
+         WHERE project_id = ? AND status IN {statuses}"
+    ))
     .bind(time::encode(now))
     .bind(project_id.to_string())
     .execute(&mut **tx)

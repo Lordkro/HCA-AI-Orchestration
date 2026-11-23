@@ -24,7 +24,7 @@ use sqlx::sqlite::{
 };
 
 pub use jobs::{Job, JobId, JobStatus, NewJob};
-pub use projects::TaskEventRecord;
+pub use projects::{Activity, NewActivity, TaskEventRecord};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 

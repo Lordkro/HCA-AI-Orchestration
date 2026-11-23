@@ -7,7 +7,57 @@ use hca_core::{
 };
 use sqlx::{Sqlite, SqliteConnection, Transaction};
 
-use crate::{time, wire_name, Result, Store, StoreError};
+use crate::{time, wire_name, JobId, NewJob, Result, Store, StoreError};
+
+/// An activity log entry to add.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewActivity {
+    /// The project.
+    pub project_id: ProjectId,
+    /// The task, if the entry is about one.
+    pub task_id: Option<TaskId>,
+    /// Who acted, e.g. `"coder"`, `"critic"`, `"user"`, `"system"`.
+    pub sender: String,
+    /// Who it was for.
+    pub recipient: String,
+    /// What happened, e.g. `"deliverable"`, `"feedback"`, `"plan"`.
+    pub kind: String,
+    /// The text.
+    pub content: String,
+    /// When.
+    pub at: DateTime<Utc>,
+}
+
+/// A stored activity log entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Activity {
+    /// Position in the log.
+    pub seq: i64,
+    /// The entry.
+    pub entry: NewActivity,
+}
+
+type ActivityRow = (i64, String, Option<String>, String, String, String, String, String);
+
+impl TryFrom<ActivityRow> for Activity {
+    type Error = StoreError;
+
+    fn try_from((seq, project, task, sender, recipient, kind, content, at): ActivityRow) -> Result<Self> {
+        let bad_id = |e: uuid::Error| StoreError::Corrupt(format!("bad id in activity: {e}"));
+        Ok(Self {
+            seq,
+            entry: NewActivity {
+                project_id: project.parse().map_err(bad_id)?,
+                task_id: task.as_deref().map(str::parse).transpose().map_err(bad_id)?,
+                sender,
+                recipient,
+                kind,
+                content,
+                at: time::decode(&at)?,
+            },
+        })
+    }
+}
 
 /// One accepted task event, as recorded in the history.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,8 +132,8 @@ impl Store {
     }
 
     /// Applies a project event atomically. When the project reaches a final
-    /// status, its queued and running jobs are cancelled in the same
-    /// transaction.
+    /// status, its queued jobs are cancelled in the same transaction, and
+    /// its running jobs too unless it completed.
     ///
     /// # Errors
     ///
@@ -101,7 +151,11 @@ impl Store {
         let status = project.apply(event, now)?;
         save_project(&mut tx, &project).await?;
         if status.is_terminal() {
-            crate::jobs::cancel_for_project(&mut tx, id, now).await?;
+            // A completed project's running job is the one that completed
+            // it, so let it finish; a failed or cancelled project stops all
+            // of its work.
+            let include_running = status != ProjectStatus::Completed;
+            crate::jobs::cancel_for_project(&mut tx, id, include_running, now).await?;
         }
         tx.commit().await?;
         Ok(status)
@@ -128,7 +182,7 @@ impl Store {
         let within = project.charge_tokens(tokens, limits, now);
         save_project(&mut tx, &project).await?;
         if !was_terminal && project.status().is_terminal() {
-            crate::jobs::cancel_for_project(&mut tx, id, now).await?;
+            crate::jobs::cancel_for_project(&mut tx, id, true, now).await?;
         }
         tx.commit().await?;
         Ok(within)
@@ -225,6 +279,27 @@ impl Store {
         limits: &Limits,
         now: DateTime<Utc>,
     ) -> Result<Transition> {
+        self.apply_task_event_with_job(id, event, limits, now, |_, _| None)
+            .await
+            .map(|(transition, _)| transition)
+    }
+
+    /// Like [`apply_task_event`](Self::apply_task_event), and also queues the
+    /// job that `next_job` returns for the resulting state, in the same
+    /// transaction. A task can then never end up assigned with no job to
+    /// work on it, even if the process crashes.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`apply_task_event`](Self::apply_task_event).
+    pub async fn apply_task_event_with_job(
+        &self,
+        id: TaskId,
+        event: TaskEvent,
+        limits: &Limits,
+        now: DateTime<Utc>,
+        next_job: impl FnOnce(&Transition, &Task) -> Option<NewJob> + Send,
+    ) -> Result<(Transition, Option<JobId>)> {
         let mut tx = self.writer.begin().await?;
         let mut task = load_task(&mut tx, id).await?;
         let project = load_project(&mut tx, task.project_id).await?;
@@ -254,8 +329,67 @@ impl Store {
         .bind(time::encode(now))
         .execute(&mut *tx)
         .await?;
+        let job = match next_job(&transition, &task) {
+            Some(job) => Some(crate::jobs::insert_job(&mut tx, &job, now).await?),
+            None => None,
+        };
         tx.commit().await?;
-        Ok(transition)
+        Ok((transition, job))
+    }
+
+    /// Adds an entry to a project's activity log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Database`] if the insert fails.
+    pub async fn log_activity(&self, entry: &NewActivity) -> Result<i64> {
+        let seq: i64 = sqlx::query_scalar(
+            "INSERT INTO activity (project_id, task_id, sender, recipient, kind, content, at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING seq",
+        )
+        .bind(entry.project_id.to_string())
+        .bind(entry.task_id.map(|t| t.to_string()))
+        .bind(&entry.sender)
+        .bind(&entry.recipient)
+        .bind(&entry.kind)
+        .bind(&entry.content)
+        .bind(time::encode(entry.at))
+        .fetch_one(&self.writer)
+        .await?;
+        Ok(seq)
+    }
+
+    /// A project's activity log, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Database`] or a decoding error on failure.
+    pub async fn activity(&self, project_id: ProjectId) -> Result<Vec<Activity>> {
+        let rows: Vec<ActivityRow> = sqlx::query_as(
+            "SELECT seq, project_id, task_id, sender, recipient, kind, content, at FROM activity \
+             WHERE project_id = ? ORDER BY seq",
+        )
+        .bind(project_id.to_string())
+        .fetch_all(&self.reader)
+        .await?;
+        rows.into_iter().map(Activity::try_from).collect()
+    }
+
+    /// The most recent activity of `kind` for a task.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Database`] or a decoding error on failure.
+    pub async fn latest_activity(&self, task_id: TaskId, kind: &str) -> Result<Option<Activity>> {
+        let row: Option<ActivityRow> = sqlx::query_as(
+            "SELECT seq, project_id, task_id, sender, recipient, kind, content, at FROM activity \
+             WHERE task_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(task_id.to_string())
+        .bind(kind)
+        .fetch_optional(&self.reader)
+        .await?;
+        row.map(Activity::try_from).transpose()
     }
 
     /// A task's history, oldest first.

@@ -17,6 +17,12 @@ uuid = { version = "1", features = ["v4", "serde"] }
 proptest = "1"
 hca-core = { path = "crates/hca-core" }
 hca-llm = { path = "crates/hca-llm" }
+hca-agents = { path = "crates/hca-agents" }
+hca-store = { path = "crates/hca-store" }
+hca-sandbox = { path = "crates/hca-sandbox" }
+hca-orchestrator = { path = "crates/hca-orchestrator" }
+hca-server = { path = "crates/hca-server" }
+tracing = "0.1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
 tempfile = "3"

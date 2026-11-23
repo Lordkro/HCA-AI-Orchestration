@@ -3,9 +3,9 @@ name: Rust v2
 on:
   push:
     branches: ["main"]
-    paths: ["crates/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", ".github/workflows/rust.yml"]
+    paths: ["crates/**", "docker/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", "hca.example.toml", "docker-compose.v2.yml", ".github/workflows/rust.yml"]
   pull_request:
-    paths: ["crates/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", ".github/workflows/rust.yml"]
+    paths: ["crates/**", "docker/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", "hca.example.toml", "docker-compose.v2.yml", ".github/workflows/rust.yml"]
 
 permissions:
   contents: read
@@ -32,3 +32,24 @@ jobs:
         run: cargo test --all-targets --locked
       - name: Docs
         run: cargo doc --no-deps --locked
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the sandbox image
+        run: docker build -t hca-sandbox -f docker/sandbox.Dockerfile docker
+      - name: Test the sandbox against real Docker
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          cargo test --locked -p hca-sandbox -- --ignored
+      - name: Build the HCA image
+        run: docker build -t hca -f docker/hca.Dockerfile .
+      - name: Check the image starts
+        run: docker run --rm hca --version
+      - name: Validate the Compose file
+        run: |
+          cp hca.example.toml hca.toml
+          docker compose -f docker-compose.v2.yml config --quiet

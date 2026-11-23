@@ -1,0 +1,66 @@
+# HCA v2 with Docker Compose.
+#
+#   docker build -t hca-sandbox -f docker/sandbox.Dockerfile docker
+#   cp hca.example.toml hca.toml        # then edit [llm]
+#   mkdir -p data && sudo chown 1000:1000 data
+#   docker compose -f docker-compose.v2.yml up -d
+#   docker compose -f docker-compose.v2.yml logs hca   # shows the dashboard link
+#
+# Safety defaults:
+# - The dashboard port is published on 127.0.0.1 only.
+# - HCA never gets the Docker socket. It talks to a proxy that only allows
+#   the container and exec calls the sandbox needs.
+# - Ollama and the proxy have no published ports.
+#
+# The data folder is mounted at the same absolute path inside and outside
+# the container, so sandbox bind mounts resolve on the host.
+
+services:
+  hca:
+    build:
+      context: .
+      dockerfile: docker/hca.Dockerfile
+    image: hca:latest
+    restart: unless-stopped
+    user: "1000:1000"
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      HCA_CONFIG: /etc/hca/hca.toml
+      HCA_BIND: 0.0.0.0:8080
+      HCA_DATA_DIR: ${PWD}/data
+      DOCKER_HOST: tcp://docker-proxy:2375
+      # Cloud keys, only needed for providers your roles use.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - ./hca.toml:/etc/hca/hca.toml:ro
+      - ${PWD}/data:${PWD}/data
+    depends_on:
+      - docker-proxy
+
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      EXEC: 1
+      POST: 1
+      INFO: 0
+      IMAGES: 0
+      NETWORKS: 0
+      VOLUMES: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    profiles: ["ollama"]
+    volumes:
+      - ollama_data:/root/.ollama
+    # Point [llm.providers.local] at http://ollama:11434 when using this.
+
+volumes:
+  ollama_data:

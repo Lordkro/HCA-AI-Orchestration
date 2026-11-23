@@ -357,3 +357,57 @@ async fn concurrent_task_events_are_all_recorded() {
         assert_eq!(store.task_history(task.id).await.unwrap().len(), 4);
     }
 }
+
+#[tokio::test]
+async fn a_transition_and_its_next_job_commit_together() {
+    let (store, _dir) = store().await;
+    let limits = Limits::default();
+    let (project, tasks) = project_with_plan(&store, &[&[]]).await;
+    let id = tasks[0].id;
+    let work = |_: &hca_core::Transition, t: &Task| {
+        Some(NewJob::new(t.project_id, "work", json!({}), t0()).for_task(t.id))
+    };
+
+    let (transition, job) = store
+        .apply_task_event_with_job(id, TaskEvent::Assign { to: AgentRole::Coder }, &limits, t0(), work)
+        .await
+        .unwrap();
+    assert_eq!(transition.to, TaskState::Assigned);
+    let job = store.job(job.unwrap()).await.unwrap();
+    assert_eq!((job.kind.as_str(), job.task_id), ("work", Some(id)));
+
+    // A refused transition queues nothing.
+    let err = store
+        .apply_task_event_with_job(id, TaskEvent::Assign { to: AgentRole::Coder }, &limits, t0(), work)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Task(_)));
+    assert_eq!(store.jobs(project.id, None).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn activity_is_logged_in_order() {
+    let (store, _dir) = store().await;
+    let (project, tasks) = project_with_plan(&store, &[&[]]).await;
+    let entry = |kind: &str, content: &str| hca_store::NewActivity {
+        project_id: project.id,
+        task_id: Some(tasks[0].id),
+        sender: "coder".into(),
+        recipient: "critic".into(),
+        kind: kind.into(),
+        content: content.into(),
+        at: t0(),
+    };
+    store.log_activity(&entry("deliverable", "first")).await.unwrap();
+    store.log_activity(&entry("feedback", "fix it")).await.unwrap();
+    store.log_activity(&entry("deliverable", "second")).await.unwrap();
+
+    let log = store.activity(project.id).await.unwrap();
+    assert_eq!(
+        log.iter().map(|a| a.entry.content.as_str()).collect::<Vec<_>>(),
+        ["first", "fix it", "second"]
+    );
+    let latest = store.latest_activity(tasks[0].id, "deliverable").await.unwrap().unwrap();
+    assert_eq!(latest.entry.content, "second");
+    assert!(store.latest_activity(tasks[0].id, "plan").await.unwrap().is_none());
+}
