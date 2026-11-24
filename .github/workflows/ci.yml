@@ -3,9 +3,9 @@ name: CI
 on:
   push:
     branches: ["main"]
-    paths: ["crates/**", "docker/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", "hca.example.toml", "docker-compose.yml", ".github/workflows/rust.yml"]
+    paths: ["crates/**", "docker/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", "hca.example.toml", "docker-compose.yml", ".github/workflows/ci.yml"]
   pull_request:
-    paths: ["crates/**", "docker/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", "hca.example.toml", "docker-compose.yml", ".github/workflows/rust.yml"]
+    paths: ["crates/**", "docker/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", "hca.example.toml", "docker-compose.yml", ".github/workflows/ci.yml"]
 
 permissions:
   contents: read

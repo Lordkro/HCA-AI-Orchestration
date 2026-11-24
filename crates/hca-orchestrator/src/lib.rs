@@ -743,8 +743,10 @@ impl Orchestrator {
         let files: Vec<String> = payload
             .get("files")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
-            .unwrap_or_default();
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
 
         let brief = self.review_brief(&task, summary, &files);
         let workspace = self.workspace(project.id)?;

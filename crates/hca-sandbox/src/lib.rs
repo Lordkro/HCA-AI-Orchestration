@@ -144,7 +144,7 @@ impl SandboxConfig {
 /// The container name for a workspace: `hca-sb-` plus the folder name
 /// (the project id), restricted to characters Docker allows.
 pub fn container_name(workspace: &Path) -> String {
-    let base = workspace.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let base = workspace.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let clean: String =
         base.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).take(64).collect();
     if clean.is_empty() {

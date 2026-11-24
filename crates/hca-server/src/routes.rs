@@ -191,8 +191,7 @@ fn artifact_type(path: &str) -> &'static str {
     let extension = std::path::Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
+        .map_or_else(String::new, str::to_ascii_lowercase);
     if path.to_ascii_lowercase().contains("test") {
         "test"
     } else if matches!(extension.as_str(), "md" | "txt" | "rst") {
