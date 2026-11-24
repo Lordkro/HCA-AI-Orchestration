@@ -113,7 +113,7 @@ async fn the_coder_writes_tests_runs_them_and_submits() {
     assert_eq!(run.files_written, vec!["fib.py", "test_fib.py"]);
     assert_eq!(run.usage.total(), 80);
     assert_eq!(charged.len(), 4, "usage is reported after every call");
-    assert!(errors(&run.transcript).is_empty());
+    assert_eq!(errors(&run.transcript), Vec::<String>::new());
     assert!(std::fs::read_to_string(s.toolbox.workspace().root().join("fib.py"))
         .unwrap()
         .contains("def fib"));
@@ -148,7 +148,7 @@ async fn refused_paths_are_reported_to_the_model_not_fatal() {
     assert!(errors[0].contains("outside the project"), "{}", errors[0]);
     assert!(errors[1].contains(".git"), "{}", errors[1]);
     assert!(errors[2].contains("missing field `content`"), "{}", errors[2]);
-    assert!(run.files_written.is_empty());
+    assert_eq!(run.files_written.len(), 0);
     assert!(!s.dir.path().join("escape.py").exists());
 }
 
@@ -188,7 +188,7 @@ async fn without_a_sandbox_there_is_no_run_command() {
 
     assert!(errors(&run.transcript)[0].contains("no tool named \"run_command\""));
     assert!(s.model.requests()[0].tools.iter().all(|t| t.name != "run_command"));
-    assert!(s.runner.calls.lock().unwrap().is_empty());
+    assert_eq!(s.runner.calls.lock().unwrap().len(), 0);
 }
 
 #[tokio::test]

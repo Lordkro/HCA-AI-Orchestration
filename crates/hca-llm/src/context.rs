@@ -187,7 +187,7 @@ mod tests {
             .file("fib.py", "print(1)", Priority::Normal)
             .section("Test output", "1 passed", Priority::High, Truncate::KeepEnd)
             .build();
-        assert!(built.dropped.is_empty() && built.truncated.is_empty());
+        assert_eq!((built.dropped.len(), built.truncated.len()), (0, 0));
         let task = built.text.find("## Task").unwrap();
         let file = built.text.find("### fib.py").unwrap();
         let tests = built.text.find("## Test output").unwrap();

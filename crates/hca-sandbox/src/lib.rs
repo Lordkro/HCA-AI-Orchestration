@@ -414,18 +414,35 @@ mod tests {
         let tmp = sandbox.run(&ws, "echo x > /tmp/ok && cat /tmp/ok", Duration::from_secs(30)).await.unwrap();
         assert_eq!(tmp.stdout.trim(), "x", "/tmp is writable");
 
-        let fork_bomb = "python -c \"import os, time\nkids = 0\ntry:\n    for _ in range(1000):\n        if os.fork() == 0:\n            time.sleep(5); os._exit(0)\n        kids += 1\nexcept OSError:\n    print('limited at', kids)\n\"";
-        let forks = sandbox.run(&ws, fork_bomb, Duration::from_mins(1)).await.unwrap();
+        // Kills and reaps its children before exiting, so the later checks
+        // aren't starved of processes.
+        std::fs::write(
+            ws.join("forks.py"),
+            "import os, signal, time\n\
+             kids = []\n\
+             try:\n    for _ in range(1000):\n        pid = os.fork()\n        if pid == 0:\n            time.sleep(60)\n            os._exit(0)\n        kids.append(pid)\n\
+             except OSError:\n    print('limited at', len(kids))\n\
+             for pid in kids:\n    os.kill(pid, signal.SIGKILL)\n\
+             for pid in kids:\n    os.waitpid(pid, 0)\n",
+        )
+        .unwrap();
+        let forks = sandbox.run(&ws, "python forks.py", Duration::from_mins(1)).await.unwrap();
         assert!(forks.stdout.contains("limited at"), "the process limit applies: {forks:?}");
+        let ok = sandbox.run(&ws, "echo still-forking", Duration::from_secs(30)).await.unwrap();
+        assert_eq!(ok.stdout.trim(), "still-forking", "processes are free again: {ok:?}");
 
         let memory = sandbox
             .run(&ws, "python -c \"b = bytearray(3 * 1024**3); print('allocated')\"", Duration::from_mins(1))
             .await
             .unwrap();
         assert!(!memory.stdout.contains("allocated"), "3 GiB doesn't fit in the 2 GiB limit: {memory:?}");
+        assert!(
+            memory.stderr.contains("MemoryError") || memory.exit_code == Some(137),
+            "the allocation failed for lack of memory: {memory:?}"
+        );
 
         let slow = sandbox.run(&ws, "sleep 30", Duration::from_secs(2)).await.unwrap();
-        assert!(slow.timed_out);
+        assert!(slow.timed_out, "the command was stopped at the timeout: {slow:?}");
         let after = sandbox.run(&ws, "echo back", Duration::from_secs(30)).await.unwrap();
         assert_eq!(after.stdout.trim(), "back", "a fresh container takes over after a timeout");
 

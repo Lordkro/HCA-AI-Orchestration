@@ -72,7 +72,7 @@ async fn invalid_plans_write_nothing() {
     b.depends_on = vec![a.id];
     let err = store.create_plan(project.id, &[a, b], &Limits::default()).await.unwrap_err();
     assert!(matches!(err, StoreError::Plan(PlanError::Cycle(_))), "{err:?}");
-    assert!(store.tasks(project.id).await.unwrap().is_empty());
+    assert_eq!(store.tasks(project.id).await.unwrap().len(), 0);
 
     let stranger = Task::new(hca_core::ProjectId::new(), "c", "", vec![], t0());
     let err = store.create_plan(project.id, &[stranger], &Limits::default()).await.unwrap_err();
@@ -131,7 +131,7 @@ async fn refused_events_change_nothing() {
     let err = store.apply_task_event(id, TaskEvent::Approve, &limits, t0()).await.unwrap_err();
     assert!(matches!(err, StoreError::Task(TransitionError::InvalidTransition { .. })), "{err:?}");
     assert_eq!(store.task(id).await.unwrap(), tasks[0]);
-    assert!(store.task_history(id).await.unwrap().is_empty());
+    assert_eq!(store.task_history(id).await.unwrap().len(), 0);
 }
 
 #[tokio::test]

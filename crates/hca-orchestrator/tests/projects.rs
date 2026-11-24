@@ -216,7 +216,7 @@ async fn spending_the_budget_stops_the_project_mid_run() {
         o.store().tasks(project.id).await.unwrap().is_empty(),
         "no plan is saved after the budget ran out"
     );
-    assert!(s.models[&AgentRole::Coder].requests().is_empty());
+    assert_eq!(s.models[&AgentRole::Coder].requests().len(), 0);
 }
 
 #[tokio::test]
@@ -259,7 +259,7 @@ async fn a_person_can_approve_instead_of_the_critic() {
     o.run_until_idle("w").await.unwrap();
 
     assert_eq!(o.store().project(project.id).await.unwrap().status(), ProjectStatus::Completed);
-    assert!(s.models[&AgentRole::Critic].requests().is_empty(), "the queued review saw the task was done");
+    assert_eq!(s.models[&AgentRole::Critic].requests().len(), 0, "the queued review saw the task was done");
 }
 
 #[tokio::test]
