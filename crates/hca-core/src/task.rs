@@ -173,6 +173,10 @@ pub struct Task {
     retries: u32,
     last_feedback: Option<String>,
     failure: Option<FailureReason>,
+    /// Tokens spent by agents working on this task. Absent in tasks saved
+    /// before this field existed.
+    #[serde(default)]
+    tokens_used: u64,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -199,6 +203,7 @@ impl Task {
             retries: 0,
             last_feedback: None,
             failure: None,
+            tokens_used: 0,
             created_at: now,
             updated_at: now,
         }
@@ -250,6 +255,20 @@ impl Task {
     /// When the task last changed state.
     pub const fn updated_at(&self) -> DateTime<Utc> {
         self.updated_at
+    }
+
+    /// Tokens spent by agents working on this task.
+    pub const fn tokens_used(&self) -> u64 {
+        self.tokens_used
+    }
+
+    /// Adds tokens spent on this task.
+    ///
+    /// Does not change [`updated_at`](Self::updated_at). That timestamp
+    /// tracks state changes and is what the task timeout measures, so a
+    /// token charge must not look like progress.
+    pub fn record_tokens(&mut self, tokens: u64) {
+        self.tokens_used = self.tokens_used.saturating_add(tokens);
     }
 
     /// Whether a failed task may still be retried.

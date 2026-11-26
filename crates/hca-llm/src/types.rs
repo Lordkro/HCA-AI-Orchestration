@@ -6,6 +6,7 @@ use std::pin::Pin;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::LlmError;
 
@@ -96,12 +97,45 @@ impl ToolSpec {
     /// derived from `T`, so the schema the model sees and the type the
     /// arguments are parsed into can't drift apart.
     pub fn of<T: JsonSchema>(name: impl Into<String>, description: impl Into<String>) -> Self {
-        let mut parameters = serde_json::to_value(schemars::schema_for!(T)).unwrap_or_default();
+        let schema = schemars::generate::SchemaSettings::default()
+            .with(|settings| settings.inline_subschemas = true)
+            .into_generator()
+            .into_root_schema_for::<T>();
+        let mut parameters = serde_json::to_value(schema).unwrap_or_default();
         if let Some(object) = parameters.as_object_mut() {
-            object.remove("$schema");
-            object.remove("title");
+            scrub_schema(object);
         }
         Self { name: name.into(), description: description.into(), parameters }
+    }
+}
+
+/// Drops schema bits Anthropic's `input_schema` rejects, and formats it
+/// doesn't understand. Nested types are inlined before this runs.
+fn scrub_schema(value: &mut Map<String, Value>) {
+    value.remove("$schema");
+    value.remove("$defs");
+    value.remove("definitions");
+    value.remove("title");
+    if let Some(format) = value.get("format").and_then(Value::as_str) {
+        const KEPT: &[&str] = &["date-time", "date", "time", "email", "uri", "uuid"];
+        if !KEPT.contains(&format) {
+            value.remove("format");
+        }
+    }
+    for child in value.values_mut() {
+        scrub_value(child);
+    }
+}
+
+fn scrub_value(value: &mut Value) {
+    match value {
+        Value::Object(map) => scrub_schema(map),
+        Value::Array(items) => {
+            for item in items {
+                scrub_value(item);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
 }
 
@@ -198,26 +232,33 @@ impl ChatResponse {
     }
 }
 
-/// A conservative token estimate for text: about 3 characters per token,
-/// rounded up. Errs high so budget checks refuse too early rather than too
-/// late.
+/// A conservative token estimate: one token per character.
+///
+/// That is high for typical English and still covers scripts where each
+/// character is its own token, so a budget check refuses early rather than
+/// letting a call through that will exceed the budget.
 pub fn estimate_tokens(text: &str) -> u64 {
-    let chars = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
-    chars.div_ceil(3)
+    u64::try_from(text.chars().count()).unwrap_or(u64::MAX)
 }
 
 /// A conservative estimate of the most tokens a request can use: everything
-/// sent, plus the full output allowance.
+/// sent, plus a small envelope per message, plus the full output allowance.
 pub fn estimate_request_tokens(request: &ChatRequest) -> u64 {
     let mut total = request.system.as_deref().map_or(0, estimate_tokens);
     for message in &request.messages {
-        total += 4 + match message {
-            Message::User { content } | Message::ToolResult { content, .. } => estimate_tokens(content),
+        // Role, separators, and the JSON envelope around the message.
+        total += 8 + match message {
+            Message::User { content } => estimate_tokens(content),
+            Message::ToolResult { name, content, .. } => estimate_tokens(name) + estimate_tokens(content),
             Message::Assistant { content, tool_calls } => {
                 estimate_tokens(content)
                     + tool_calls
                         .iter()
-                        .map(|c| estimate_tokens(&c.name) + estimate_tokens(&c.arguments.to_string()))
+                        .map(|call| {
+                            estimate_tokens(&call.id)
+                                + estimate_tokens(&call.name)
+                                + estimate_tokens(&call.arguments.to_string())
+                        })
                         .sum::<u64>()
             }
         };
@@ -254,6 +295,25 @@ mod tests {
         assert!(spec.parameters.get("$schema").is_none());
     }
 
+    #[derive(JsonSchema)]
+    #[allow(dead_code)]
+    struct Nested {
+        /// A nested object.
+        item: WriteFile,
+        /// How many.
+        count: u64,
+    }
+
+    #[test]
+    fn nested_tool_schemas_have_no_refs() {
+        let spec = ToolSpec::of::<Nested>("nested", "A nested tool");
+        let text = spec.parameters.to_string();
+        assert!(!text.contains("$ref"), "{text}");
+        assert!(!text.contains("$defs"), "{text}");
+        assert!(!text.contains("uint"), "{text}");
+        assert_eq!(spec.parameters["properties"]["item"]["type"], "object");
+    }
+
     #[test]
     fn tool_calls_parse_into_types() {
         let call = ToolCall {
@@ -274,7 +334,7 @@ mod tests {
     #[test]
     fn estimates_err_high() {
         assert_eq!(estimate_tokens(""), 0);
-        assert_eq!(estimate_tokens("abcd"), 2);
+        assert_eq!(estimate_tokens("abcd"), 4);
         let request = ChatRequest {
             model: "m".into(),
             system: Some("x".repeat(300)),
@@ -283,6 +343,6 @@ mod tests {
             max_tokens: 1000,
             temperature: None,
         };
-        assert_eq!(estimate_request_tokens(&request), 100 + 104 + 1000);
+        assert_eq!(estimate_request_tokens(&request), 300 + 8 + 300 + 1000);
     }
 }

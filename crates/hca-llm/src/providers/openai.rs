@@ -60,10 +60,18 @@ impl OpenAiCompatibleProvider {
             messages.push(match message {
                 Message::User { content } => json!({ "role": "user", "content": content }),
                 Message::Assistant { content, tool_calls } => {
-                    let mut turn = json!({
-                        "role": "assistant",
-                        "content": if content.is_empty() { Value::Null } else { json!(content) },
-                    });
+                    // Chat Completions requires content or tool_calls. An
+                    // empty turn with neither is sent as "" so the next call
+                    // is not rejected. Null content is valid alongside tool
+                    // calls.
+                    let content = if content.is_empty() && tool_calls.is_empty() {
+                        json!("")
+                    } else if content.is_empty() {
+                        Value::Null
+                    } else {
+                        json!(content)
+                    };
+                    let mut turn = json!({ "role": "assistant", "content": content });
                     if !tool_calls.is_empty() {
                         turn["tool_calls"] = tool_calls
                             .iter()
@@ -183,7 +191,7 @@ struct WireChoice {
 #[derive(Deserialize)]
 struct WireMessage {
     content: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::http::null_as_default")]
     tool_calls: Vec<WireToolCall>,
 }
 

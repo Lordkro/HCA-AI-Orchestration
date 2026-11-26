@@ -156,9 +156,11 @@ fn render(section: &Section, body: &str) -> String {
     }
 }
 
-/// Shortens `body` to about `tokens`, marking what was cut.
+/// Shortens `body` to about `tokens` characters. The token estimate counts one
+/// token per character, so this many characters is the budget for the kept text.
+/// The omission note is extra.
 fn cut(body: &str, tokens: u64, keep: Truncate) -> String {
-    let keep_chars = usize::try_from(tokens.saturating_mul(3)).unwrap_or(usize::MAX);
+    let keep_chars = usize::try_from(tokens).unwrap_or(usize::MAX);
     let total = body.chars().count();
     if total <= keep_chars {
         return body.to_owned();
@@ -231,6 +233,6 @@ mod tests {
     #[test]
     fn cutting_respects_multibyte_characters() {
         let cut_text = cut(&"é".repeat(1_000), 10, Truncate::KeepStart);
-        assert!(cut_text.starts_with(&"é".repeat(30)));
+        assert!(cut_text.starts_with(&"é".repeat(10)));
     }
 }

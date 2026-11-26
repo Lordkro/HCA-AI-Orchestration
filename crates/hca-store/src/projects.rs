@@ -188,6 +188,32 @@ impl Store {
         Ok(within)
     }
 
+    /// Adds tokens to a task without changing its state or `updated_at`.
+    ///
+    /// The task timeout is measured from `updated_at`, so recording spend
+    /// must not reset it. A crash between this and [`charge_tokens`](Self::charge_tokens)
+    /// can count the tokens on the task twice after a retry; that is preferred
+    /// to dropping them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::NotFound`] if there is no such task.
+    pub async fn add_task_tokens(&self, id: TaskId, tokens: u64) -> Result<()> {
+        if tokens == 0 {
+            return Ok(());
+        }
+        let mut tx = self.writer.begin().await?;
+        let mut task = load_task(&mut tx, id).await?;
+        task.record_tokens(tokens);
+        sqlx::query("UPDATE tasks SET data = ? WHERE id = ?")
+            .bind(serde_json::to_string(&task)?)
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Validates a plan with the core rules and saves all of its tasks, or
     /// none of them.
     ///

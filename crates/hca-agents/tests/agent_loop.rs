@@ -26,6 +26,7 @@ impl CommandRunner for FakeRunner {
         workspace: &'a Path,
         command: &'a str,
         _timeout: Duration,
+        _user: Option<&'a str>,
     ) -> BoxFuture<'a, Result<CommandOutput, String>> {
         self.calls.lock().unwrap().push((workspace.to_path_buf(), command.to_owned()));
         Box::pin(async {

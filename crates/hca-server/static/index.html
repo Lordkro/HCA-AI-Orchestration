@@ -108,6 +108,7 @@
                     <div class="project-controls">
                         <span class="project-status-badge" id="projectDetailStatus">active</span>
                         <button class="btn-sm btn-warning" id="btnPause" onclick="togglePause()">⏸ Pause</button>
+                        <button class="btn-sm btn-danger" id="btnCancel" onclick="cancelProject()">Cancel</button>
                     </div>
                 </div>
 
@@ -148,6 +149,10 @@
                     <div class="kanban-column" data-state="review">
                         <h3>🔍 Review <span class="kanban-count" id="countReview">0</span></h3>
                         <div class="kanban-cards" id="kanbanReview"></div>
+                    </div>
+                    <div class="kanban-column" data-state="revision">
+                        <h3>🔁 Revision <span class="kanban-count" id="countRevision">0</span></h3>
+                        <div class="kanban-cards" id="kanbanRevision"></div>
                     </div>
                     <div class="kanban-column" data-state="done">
                         <h3>✅ Done <span class="kanban-count" id="countDone">0</span></h3>

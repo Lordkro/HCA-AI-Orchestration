@@ -54,8 +54,7 @@ fn task_json(task: &Task, limits: &Limits, deliverable: Option<&str>) -> Value {
         "max_iterations": limits.max_revisions,
         "retries": task.retries(),
         "max_retries": limits.max_retries,
-        "priority": "normal",
-        "tokens_used": 0,
+        "tokens_used": task.tokens_used(),
         "depends_on": task.depends_on,
         "created_at": task.created_at(),
         "updated_at": task.updated_at(),
@@ -304,15 +303,23 @@ pub(crate) async fn websocket(
     upgrade.on_upgrade(move |socket| forward_events(socket, events))
 }
 
-/// Browsers always send `Origin` on WebSocket handshakes. Accept it only if
-/// it names the same host and port the request was sent to. Clients that
-/// aren't browsers (no `Origin`) still need the token.
+/// Browsers always send `Origin` on WebSocket handshakes. Accept it only
+/// when the host matches and the scheme matches `X-Forwarded-Proto`, or
+/// `http` when that header is absent. HCA does not terminate TLS itself.
+/// Clients that aren't browsers (no `Origin`) still need the token.
 fn same_origin(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
         return true;
     };
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or_default();
-    origin.split_once("://").is_some_and(|(_, rest)| rest.trim_end_matches('/') == host)
+    let Some((scheme, rest)) = origin.split_once("://") else {
+        return false;
+    };
+    if rest.trim_end_matches('/') != host {
+        return false;
+    }
+    let expected = headers.get("x-forwarded-proto").and_then(|value| value.to_str().ok()).unwrap_or("http");
+    scheme.eq_ignore_ascii_case(expected)
 }
 
 async fn forward_events(mut socket: WebSocket, mut events: tokio::sync::broadcast::Receiver<Value>) {
@@ -353,9 +360,14 @@ mod tests {
     #[test]
     fn websocket_origin_must_match_the_host() {
         assert!(same_origin(&headers(Some("http://127.0.0.1:8080"), "127.0.0.1:8080")));
+        assert!(!same_origin(&headers(Some("https://127.0.0.1:8080"), "127.0.0.1:8080")));
         assert!(!same_origin(&headers(Some("https://evil.example"), "127.0.0.1:8080")));
         assert!(!same_origin(&headers(Some("http://127.0.0.1:8080.evil.example"), "127.0.0.1:8080")));
         assert!(same_origin(&headers(None, "127.0.0.1:8080")));
+
+        let mut forwarded = headers(Some("https://127.0.0.1:8080"), "127.0.0.1:8080");
+        forwarded.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert!(same_origin(&forwarded));
     }
 
     #[test]

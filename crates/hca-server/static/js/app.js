@@ -78,7 +78,21 @@ function capitalize(s) {
 // WebSocket Connection
 // ============================================================
 
-function connectWebSocket() {
+async function connectWebSocket() {
+    if (!getToken()) {
+        askForToken();
+        return;
+    }
+    try {
+        await apiFetch('/api/health');
+    } catch (err) {
+        if (err.message === 'Not signed in') {
+            return;
+        }
+        updateConnectionStatus(false);
+        setTimeout(connectWebSocket, 3000);
+        return;
+    }
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${window.location.host}/ws?token=${encodeURIComponent(getToken())}`;
 
@@ -189,7 +203,7 @@ async function submitIdea() {
         viewProject(result.project_id);
     } catch (err) {
         console.error('Failed to submit idea:', err);
-        alert('Failed to submit idea. Is the server running?');
+        alert(err.message || 'Failed to submit idea. Is the server running?');
     } finally {
         btn.disabled = false;
         btn.textContent = 'Submit to Team';
@@ -231,6 +245,18 @@ async function loadProjectDetail(projectId) {
         renderArtifacts(artifacts);
     } catch (err) {
         console.error('Failed to load project detail:', err);
+    }
+}
+
+async function cancelProject() {
+    if (!currentProjectId) return;
+    if (!window.confirm('Cancel this project? Running work stops.')) return;
+    try {
+        await apiFetch(`/api/projects/${currentProjectId}/cancel`, { method: 'POST' });
+        await loadProjectDetail(currentProjectId);
+        loadProjects();
+    } catch (err) {
+        alert(`Failed to cancel project: ${err.message}`);
     }
 }
 
@@ -365,6 +391,9 @@ function renderProjectDetail(data) {
         btn.style.display = 'none';
     }
 
+    const cancel = document.getElementById('btnCancel');
+    cancel.style.display = (project.status === 'active' || project.status === 'paused') ? '' : 'none';
+
     // Progress
     if (progress) {
         const pct = progress.progress_pct || 0;
@@ -386,16 +415,16 @@ function renderProjectDetail(data) {
 
 const KANBAN_STATE_MAP = {
     pending: 'Pending', assigned: 'Assigned', in_progress: 'InProgress',
-    review: 'Review', revision: 'Review', approved: 'Done', done: 'Done', failed: 'Failed',
+    review: 'Review', revision: 'Revision', approved: 'Done', done: 'Done', failed: 'Failed',
 };
 
 function renderKanban(tasks) {
     // Clear all columns
-    ['Pending', 'Assigned', 'InProgress', 'Review', 'Done', 'Failed'].forEach(col => {
+    ['Pending', 'Assigned', 'InProgress', 'Review', 'Revision', 'Done', 'Failed'].forEach(col => {
         document.getElementById(`kanban${col}`).innerHTML = '';
     });
 
-    const counts = { Pending: 0, Assigned: 0, InProgress: 0, Review: 0, Done: 0, Failed: 0 };
+    const counts = { Pending: 0, Assigned: 0, InProgress: 0, Review: 0, Revision: 0, Done: 0, Failed: 0 };
 
     tasks.forEach(task => {
         const col = KANBAN_STATE_MAP[task.state] || 'Pending';
@@ -420,6 +449,7 @@ function renderKanban(tasks) {
     document.getElementById('countAssigned').textContent = counts.Assigned;
     document.getElementById('countInProgress').textContent = counts.InProgress;
     document.getElementById('countReview').textContent = counts.Review;
+    document.getElementById('countRevision').textContent = counts.Revision;
     document.getElementById('countDone').textContent = counts.Done;
     document.getElementById('countFailed').textContent = counts.Failed;
 }
@@ -441,6 +471,11 @@ function showTaskModal(task) {
                 <button class="btn-sm btn-danger" onclick="rejectTask('${task.id}')">🔄 Needs Revision</button>
             </div>
         </div>`;
+    } else if (task.state === 'revision') {
+        hitlHtml = `
+        <div class="hitl-section">
+            <p>The agent will revise this task.</p>
+        </div>`;
     } else if (task.state === 'in_progress' || task.state === 'assigned') {
         hitlHtml = `
         <div class="hitl-section">
@@ -458,8 +493,6 @@ function showTaskModal(task) {
             <span class="value"><span class="badge">${task.state}</span></span>
             <span class="label">Assigned to</span>
             <span class="value">${ROLE_ICONS[task.assigned_to] || '—'} ${task.assigned_to || 'unassigned'}</span>
-            <span class="label">Priority</span>
-            <span class="value">${task.priority}</span>
             <span class="label">Iteration</span>
             <span class="value">${task.iteration} / ${task.max_iterations}</span>
             <span class="label">Tokens</span>

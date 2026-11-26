@@ -74,7 +74,15 @@ pub fn router(state: AppState) -> Router {
 }
 
 fn static_file(content_type: &'static str, body: &'static str) -> Response {
-    ([(header::CONTENT_TYPE, content_type), (header::X_CONTENT_TYPE_OPTIONS, "nosniff")], body)
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::X_FRAME_OPTIONS, "DENY"),
+            (header::CONTENT_SECURITY_POLICY, "frame-ancestors 'none'"),
+        ],
+        body,
+    )
         .into_response()
 }
 

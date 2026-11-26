@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer};
 
 use crate::{LlmError, RetryConfig};
 
@@ -45,6 +46,18 @@ async fn send_once<T: DeserializeOwned>(
     }
     serde_json::from_str(&text)
         .map_err(|e| LlmError::Decode { provider: provider.to_owned(), message: e.to_string() })
+}
+
+/// Deserializes JSON `null` as `T::default()`.
+///
+/// Providers sometimes send `"content": null` or `"tool_calls": null`.
+/// `#[serde(default)]` alone does not accept null.
+pub(crate) fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// Parses tool-call arguments that arrive as a JSON string. Invalid JSON is
