@@ -75,6 +75,8 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     environment:
+      # Reachable only on the internal docker-api network below.
+      HCA_GUARD_LISTEN: 0.0.0.0:2375
       HCA_GUARD_IMAGE: hca-sandbox:latest
       HCA_GUARD_VOLUME: hca-workspaces
       # Set to "true" together with `[sandbox] network = true`.

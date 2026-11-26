@@ -225,37 +225,47 @@ impl Store {
     /// before the call is made. See [`Project::reserve_tokens`].
     ///
     /// A [`Reservation::Refused`] call can't fit even once every other call
-    /// settles, so the project fails as out of budget in the same
-    /// transaction, and its jobs are cancelled.
+    /// settles. The caller may make it smaller, or give up with
+    /// [`exhaust_budget`](Self::exhaust_budget).
     ///
     /// # Errors
     ///
     /// Returns [`StoreError::ProjectNotActive`] if the project doesn't
     /// accept work (paused, or ended), or [`StoreError::NotFound`].
-    pub async fn reserve_usage(
-        &self,
-        id: ProjectId,
-        tokens: u64,
-        limits: &Limits,
-        now: DateTime<Utc>,
-    ) -> Result<Reservation> {
+    pub async fn reserve_usage(&self, id: ProjectId, tokens: u64, limits: &Limits) -> Result<Reservation> {
         let mut tx = self.writer.begin().await?;
         let mut project = load_project(&mut tx, id).await?;
         if !project.accepts_work() {
             return Err(StoreError::ProjectNotActive(project.status()));
         }
         let reservation = project.reserve_tokens(tokens, limits);
-        match reservation {
-            Reservation::Granted => save_project(&mut tx, &project).await?,
-            Reservation::Busy => return Ok(reservation),
-            Reservation::Refused(_) => {
-                project.exhaust_budget(now);
-                save_project(&mut tx, &project).await?;
-                crate::jobs::cancel_for_project(&mut tx, id, true, now).await?;
-            }
+        if reservation == Reservation::Granted {
+            save_project(&mut tx, &project).await?;
+            tx.commit().await?;
         }
-        tx.commit().await?;
         Ok(reservation)
+    }
+
+    /// Fails a project because its remaining budget can't cover even the
+    /// smallest next model call, and cancels its jobs, in one transaction.
+    /// Does nothing to a project that already ended.
+    ///
+    /// Returns whether the project was failed by this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::NotFound`] if the project doesn't exist.
+    pub async fn exhaust_budget(&self, id: ProjectId, now: DateTime<Utc>) -> Result<bool> {
+        let mut tx = self.writer.begin().await?;
+        let mut project = load_project(&mut tx, id).await?;
+        if project.status().is_terminal() {
+            return Ok(false);
+        }
+        project.exhaust_budget(now);
+        save_project(&mut tx, &project).await?;
+        crate::jobs::cancel_for_project(&mut tx, id, true, now).await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// Settles a reservation made by [`reserve_usage`](Self::reserve_usage):

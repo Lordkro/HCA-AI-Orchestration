@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use hca_core::AgentRole;
+use hca_core::{AgentRole, BudgetError};
 use hca_llm::{
     estimate_request_tokens, max_request_tokens, Conversation, Llm, LlmError, Message, StopReason, Usage,
 };
@@ -165,19 +165,7 @@ impl<'a> Agent<'a> {
                     }
                 }
             }
-            // Reserve the worst case: whatever happens next, the call can't
-            // cost more.
-            let bound = max_request_tokens(&request);
-            meter.reserve(bound).await?;
-            let result = self.llm.send(role, &request).await;
-            let spent = match &result {
-                Ok(response) => Some(response.usage),
-                Err(error) if error.is_unbilled() => Some(Usage::default()),
-                // Maybe billed, at an unknown cost: count the worst case.
-                Err(_) => None,
-            };
-            meter.settle(bound, spent).await?;
-            let response = result?;
+            let response = self.call(role, &mut conversation, &mut request, meter).await?;
             usage.input_tokens += response.usage.input_tokens;
             usage.output_tokens += response.usage.output_tokens;
             conversation.messages.push(response.to_message());
@@ -237,12 +225,82 @@ impl<'a> Agent<'a> {
 /// tokens are freed. The brief (the first message) and the last
 /// [`KEEP_RECENT`] messages are kept whole. Nothing is removed outright:
 /// results keep their call ids and arguments stay JSON objects.
-fn fit(messages: &mut [Message], excess: u64) {
+///
+/// Returns the tokens freed: 0 when nothing is left to trim.
+/// Retries of a call that failed in a way that may have been billed (a
+/// timeout, a cut connection), each charged in full. The HTTP layer
+/// doesn't retry these, so that no attempt goes uncounted.
+const MAX_BILLED_RETRIES: u32 = 2;
+
+/// Wait before the first such retry; it doubles after.
+const BILLED_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+impl Agent<'_> {
+    /// Makes one model call: reserves its worst case, sends it, settles
+    /// what it cost.
+    ///
+    /// - If the budget can't cover it, the oldest tool output is trimmed
+    ///   until it can. Only when nothing is left to trim does the call fail
+    ///   with the budget error.
+    /// - A call that failed in a way that may have been billed is charged
+    ///   in full and tried again, up to [`MAX_BILLED_RETRIES`] times, so a
+    ///   timeout late in a long run doesn't throw the run away.
+    async fn call(
+        &self,
+        role: AgentRole,
+        conversation: &mut Conversation,
+        request: &mut hca_llm::ChatRequest,
+        meter: &dyn UsageMeter,
+    ) -> Result<hca_llm::ChatResponse, AgentError> {
+        let mut retries = 0;
+        loop {
+            // Reserve the worst case: whatever happens next, the call can't
+            // cost more.
+            let bound = max_request_tokens(request);
+            match meter.reserve(bound).await {
+                Ok(()) => {}
+                Err(MeterError::Budget(BudgetError::Insufficient { needed, remaining })) => {
+                    // The bound counts a token per byte, the trimming a
+                    // token per three bytes.
+                    if fit(&mut conversation.messages, (needed - remaining).div_ceil(3)) == 0 {
+                        return Err(
+                            MeterError::Budget(BudgetError::Insufficient { needed, remaining }).into()
+                        );
+                    }
+                    *request = self.llm.request(role, conversation)?;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            let result = self.llm.send(role, request).await;
+            let spent = match &result {
+                Ok(response) => Some(response.usage),
+                Err(error) if error.is_unbilled() => Some(Usage::default()),
+                // Maybe billed, at an unknown cost: count the worst case.
+                Err(_) => None,
+            };
+            meter.settle(bound, spent).await?;
+            match result {
+                Ok(response) => return Ok(response),
+                Err(error)
+                    if error.is_retryable() && !error.is_unbilled() && retries < MAX_BILLED_RETRIES =>
+                {
+                    tracing::warn!(%error, "model call failed after it was sent; trying again");
+                    tokio::time::sleep(BILLED_RETRY_DELAY * 2_u32.pow(retries)).await;
+                    retries += 1;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+}
+
+fn fit(messages: &mut [Message], excess: u64) -> u64 {
     let end = messages.len().saturating_sub(KEEP_RECENT);
     let mut freed = 0_u64;
     for message in messages.iter_mut().take(end).skip(1) {
         if freed >= excess {
-            return;
+            return freed;
         }
         match message {
             Message::ToolResult { content, .. } if content.len() > MIN_ELIDE_BYTES => {
@@ -264,6 +322,7 @@ fn fit(messages: &mut [Message], excess: u64) {
             _ => {}
         }
     }
+    freed
 }
 
 /// Shortens a single tool result that would take more than a quarter of

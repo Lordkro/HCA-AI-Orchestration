@@ -54,8 +54,10 @@ enum Command {
     /// Run the Docker guard: a proxy to the Docker socket that only lets
     /// sandbox containers through. See `docker-compose.yml`.
     DockerGuard {
-        /// Address to listen on. Keep it on a network only HCA can reach.
-        #[arg(long, env = "HCA_GUARD_LISTEN", default_value = "0.0.0.0:2375")]
+        /// Address to listen on. It has no authentication, so keep it on a
+        /// network only HCA can reach; Compose sets `0.0.0.0:2375` on an
+        /// internal network.
+        #[arg(long, env = "HCA_GUARD_LISTEN", default_value = "127.0.0.1:2375")]
         listen: std::net::SocketAddr,
         /// The Docker socket.
         #[arg(long, env = "HCA_GUARD_SOCKET", default_value = "/var/run/docker.sock")]

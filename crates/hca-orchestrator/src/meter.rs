@@ -8,8 +8,10 @@
 //!   when the cost is unknown: the call timed out, the run was cut short
 //!   mid-call, or the process died (then at the next start). No billed
 //!   token goes uncounted.
-//! - **A call that can never fit ends the project** as out of budget at
-//!   once, instead of failing tasks one retry at a time. A call that only
+//! - **A call that can never fit is refused** with the budget error. The
+//!   agent then trims its conversation and tries a smaller call; if even
+//!   the smallest can't fit, the orchestrator ends the project as out of
+//!   budget, instead of failing tasks one retry at a time. A call that only
 //!   waits on other calls' reservations waits for them to settle.
 //! - **Paused, finished or shutting down stops the run** at the next call.
 //!
@@ -32,9 +34,6 @@ use crate::Orchestrator;
 pub(crate) const STOP_PAUSED: &str = "the project was paused";
 /// What a stopped run says when HCA is shutting down.
 pub(crate) const STOP_SHUTDOWN: &str = "HCA is shutting down";
-/// What a stopped run says when the budget can't cover its next call.
-pub(crate) const STOP_BUDGET: &str = "the remaining token budget can't cover the next model call";
-
 /// How often a call waiting on other calls' reservations asks again.
 const BUSY_RETRY: Duration = Duration::from_millis(250);
 
@@ -78,21 +77,14 @@ impl<'a> ProjectMeter<'a> {
             if o.stopping.load(Ordering::SeqCst) {
                 return Err(MeterError::Stopped(STOP_SHUTDOWN.into()));
             }
-            let reservation =
-                o.store.reserve_usage(self.project, estimate, &o.config.limits, Utc::now()).await;
+            let reservation = o.store.reserve_usage(self.project, estimate, &o.config.limits).await;
             match reservation {
                 Ok(Reservation::Granted) => {
                     self.held.fetch_add(estimate, Ordering::SeqCst);
                     return Ok(());
                 }
                 Ok(Reservation::Busy) => tokio::time::sleep(BUSY_RETRY).await,
-                Ok(Reservation::Refused(error)) => {
-                    tracing::info!(project = %self.project, %error, "project out of budget");
-                    if !self.exhausted.swap(true, Ordering::SeqCst) {
-                        o.after_project_change(self.project, "Token budget spent. Project stopped.").await;
-                    }
-                    return Err(MeterError::Stopped(STOP_BUDGET.into()));
-                }
+                Ok(Reservation::Refused(error)) => return Err(MeterError::Budget(error)),
                 Err(StoreError::ProjectNotActive(ProjectStatus::Paused)) => {
                     return Err(MeterError::Stopped(STOP_PAUSED.into()))
                 }
@@ -238,17 +230,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_call_that_can_never_fit_stops_the_project() {
+    async fn a_call_that_can_never_fit_is_refused_for_the_agent_to_shrink() {
         let (o, project, _dir) = orchestrator(1_000).await;
         let meter = ProjectMeter::new(&o, project.id, None, AgentRole::Coder, 1);
         let refused = meter.reserve(1_001).await.unwrap_err();
-        assert!(matches!(&refused, MeterError::Stopped(r) if r == STOP_BUDGET), "{refused:?}");
+        assert!(matches!(&refused, MeterError::Budget(_)), "{refused:?}");
         let p = o.store.project(project.id).await.unwrap();
-        assert_eq!(
-            (p.status(), p.failure()),
-            (ProjectStatus::Failed, Some(&ProjectFailure::BudgetExhausted))
-        );
-        assert_eq!(p.tokens_used(), 0, "nothing was spent");
+        assert_eq!((p.status(), p.tokens_used(), p.tokens_reserved()), (ProjectStatus::Active, 0, 0));
+        meter.reserve(900).await.unwrap();
+        meter.settle(900, Some(Usage::default())).await.unwrap();
     }
 
     #[tokio::test]

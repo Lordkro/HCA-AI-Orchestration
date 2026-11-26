@@ -371,3 +371,65 @@ async fn read_file_can_return_a_range_of_lines() {
     let Message::ToolResult { content, .. } = &run.transcript[2] else { panic!("{:?}", run.transcript) };
     assert_eq!(content, "[lines 2-3 of 4]\ntwo\nthree");
 }
+
+#[tokio::test]
+async fn a_tight_budget_trims_the_conversation_instead_of_failing() {
+    // Eight reads of a 20 KB file: the conversation's worst case soon
+    // passes the 100,000-token budget, though little has been spent.
+    let mut script = ScriptedProvider::new();
+    for _ in 0..8 {
+        script = script.then_tool("read_file", json!({"path": "big.txt"}));
+    }
+    let s = setup(AgentRole::Coder, script.then_tool("submit", json!({"summary": "read it all"})), false);
+    std::fs::write(s.dir.path().join("project/big.txt"), "x".repeat(20_000)).unwrap();
+    let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig::default());
+    let meter = LocalMeter::new(TokenBudget::new(100_000));
+
+    let run = agent.run(AgentRole::Coder, "task", &meter).await.unwrap();
+    assert_eq!(run.steps, 9);
+    let requests = s.model.requests();
+    let untrimmed: u64 = 20_000 * 8;
+    let last = hca_llm::max_request_tokens(requests.last().unwrap());
+    assert!(last < 100_000 && last < untrimmed, "old reads were trimmed to fit: {last}");
+}
+
+#[tokio::test]
+async fn a_timed_out_call_is_charged_and_tried_again() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let reply = json!({
+        "choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "submit", "arguments": "{\"summary\": \"done\"}"}
+        }]}, "finish_reason": "tool_calls"}],
+        "usage": {"prompt_tokens": 30, "completion_tokens": 10}
+    });
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&reply).set_delay(Duration::from_secs(3)))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&reply))
+        .mount(&server)
+        .await;
+    let config: hca_llm::LlmConfig = serde_json::from_value(json!({
+        "providers": {"local": {"kind": "openai_compatible", "base_url": format!("{}/v1", server.uri())}},
+        "roles": {"coder": {"provider": "local", "model": "m", "max_tokens": 100}},
+        "timeout_secs": 1
+    }))
+    .unwrap();
+    let llm = config.build_with_env(|_| None).unwrap();
+    let s = setup(AgentRole::Coder, ScriptedProvider::new(), false);
+    let agent = Agent::new(&llm, &s.toolbox, AgentConfig::default());
+    let meter = meter();
+
+    let run = agent.run(AgentRole::Coder, "task", &meter).await.unwrap();
+    assert!(matches!(run.submission, Submission::Work { .. }), "the run went on");
+    let calls = meter.calls();
+    assert_eq!(calls.len(), 2, "both attempts are settled: {calls:?}");
+    assert!(calls[0].total() > 1_000, "the timed-out attempt counts its worst case: {calls:?}");
+    assert_eq!(calls[1].total(), 40, "the answered one its real usage");
+}

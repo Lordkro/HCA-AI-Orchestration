@@ -1163,8 +1163,15 @@ impl Orchestrator {
         };
         match result {
             Ok(run) => Ok(RunOutcome::Done(Box::new(run))),
+            // The agent already trimmed its conversation as far as it
+            // could: no call of this project can fit any more, so retrying
+            // tasks would only fail again. End the project.
             Err(AgentError::Llm(LlmError::Budget(e))) => {
-                Ok(RunOutcome::Failed(FailureReason::BudgetExhausted, e.to_string()))
+                tracing::info!(project = %project.id, error = %e, "project out of budget");
+                if self.store.exhaust_budget(project.id, Utc::now()).await? {
+                    self.after_project_change(project.id, "Token budget spent. Project stopped.").await;
+                }
+                Err(JobError::LeaseLost)
             }
             Err(AgentError::Llm(e)) if e.is_retryable() => Err(JobError::Retry(e.to_string())),
             Err(AgentError::Meter(message)) => Err(JobError::Retry(message)),

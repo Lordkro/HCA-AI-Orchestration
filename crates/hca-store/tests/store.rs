@@ -465,8 +465,8 @@ async fn reservations_are_saved_settled_and_charged_after_a_crash() {
     let (project, tasks) = project_with_plan(&store, &[&[]]).await;
     let limits = Limits { project_token_budget: 1_000, ..Limits::default() };
 
-    assert_eq!(store.reserve_usage(project.id, 600, &limits, t0()).await.unwrap(), Reservation::Granted);
-    assert_eq!(store.reserve_usage(project.id, 600, &limits, t0()).await.unwrap(), Reservation::Busy);
+    assert_eq!(store.reserve_usage(project.id, 600, &limits).await.unwrap(), Reservation::Granted);
+    assert_eq!(store.reserve_usage(project.id, 600, &limits).await.unwrap(), Reservation::Busy);
     assert!(store.settle_usage(project.id, Some(tasks[0].id), 600, 200, &limits, t0()).await.unwrap());
     let saved = store.project(project.id).await.unwrap();
     assert_eq!((saved.tokens_used(), saved.tokens_reserved()), (200, 0));
@@ -474,7 +474,7 @@ async fn reservations_are_saved_settled_and_charged_after_a_crash() {
 
     // The process dies mid-call: the reservation stays saved and counts in
     // full at the next start.
-    store.reserve_usage(project.id, 700, &limits, t0()).await.unwrap();
+    store.reserve_usage(project.id, 700, &limits).await.unwrap();
     assert_eq!(store.charge_open_reservations(&limits, t0()).await.unwrap(), 1);
     let saved = store.project(project.id).await.unwrap();
     assert_eq!((saved.tokens_used(), saved.tokens_reserved()), (900, 0));
@@ -488,11 +488,18 @@ async fn a_call_that_can_never_fit_ends_the_project_as_out_of_budget() {
     store.enqueue(&NewJob::new(project.id, "code", json!({}), t0()), t0()).await.unwrap();
     let limits = Limits { project_token_budget: 1_000, ..Limits::default() };
 
-    let refused = store.reserve_usage(project.id, 1_500, &limits, t0()).await.unwrap();
+    let refused = store.reserve_usage(project.id, 1_500, &limits).await.unwrap();
     assert!(matches!(refused, Reservation::Refused(_)), "{refused:?}");
+    assert_eq!(
+        store.project(project.id).await.unwrap().status(),
+        ProjectStatus::Active,
+        "a smaller call may fit"
+    );
+    assert!(store.exhaust_budget(project.id, t0()).await.unwrap());
+    assert!(!store.exhaust_budget(project.id, t0()).await.unwrap(), "only once");
     let saved = store.project(project.id).await.unwrap();
     assert_eq!(saved.failure(), Some(&ProjectFailure::BudgetExhausted));
     assert!(store.open_jobs(project.id).await.unwrap().is_empty(), "its jobs are cancelled");
-    let paused = store.reserve_usage(project.id, 1, &limits, t0()).await.unwrap_err();
+    let paused = store.reserve_usage(project.id, 1, &limits).await.unwrap_err();
     assert!(matches!(paused, StoreError::ProjectNotActive(ProjectStatus::Failed)), "{paused:?}");
 }
