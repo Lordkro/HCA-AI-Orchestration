@@ -45,6 +45,18 @@ pub enum LlmError {
 }
 
 impl LlmError {
+    /// Whether the provider certainly didn't bill the call: it was never
+    /// sent (no connection, a configuration problem, refused by the budget)
+    /// or the provider rejected it with an error status. A timeout, a cut
+    /// connection or an unreadable response may still have been billed.
+    pub fn is_unbilled(&self) -> bool {
+        match self {
+            Self::Transport { source, .. } => source.is_connect() || source.is_builder(),
+            Self::Status { .. } | Self::Budget(_) | Self::NoModelForRole(_) | Self::Config(_) => true,
+            Self::Decode { .. } => false,
+        }
+    }
+
     /// Whether trying again later could succeed: network failures, rate
     /// limits (429) and server errors (5xx).
     pub fn is_retryable(&self) -> bool {

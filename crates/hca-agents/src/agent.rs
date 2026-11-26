@@ -2,15 +2,36 @@
 //! it calls its finishing tool.
 //!
 //! Every run is bounded three ways: a step limit, the project's token
-//! budget (checked before each call), and a limit on how often the model
-//! may stop without finishing.
+//! budget (reserved through a [`UsageMeter`] before each call), and a limit
+//! on how often the model may stop without finishing.
+//!
+//! The conversation is kept within the model's context window. Old tool
+//! output and the bodies of old file writes are replaced by a short note
+//! when space runs out; messages are never removed, so every tool call
+//! keeps its result, as the providers require.
 
 use std::collections::BTreeSet;
 
-use hca_core::{AgentRole, TokenBudget};
-use hca_llm::{Conversation, Llm, LlmError, Message, StopReason, Usage};
+use hca_core::AgentRole;
+use hca_llm::{
+    estimate_request_tokens, max_request_tokens, Conversation, Llm, LlmError, Message, StopReason, Usage,
+};
 
-use crate::{system_prompt, Submission, Toolbox};
+use crate::{system_prompt, MeterError, Submission, Toolbox, UsageMeter};
+
+/// What replaces old tool output when the context fills up.
+const ELIDED_OUTPUT: &str =
+    "[older output removed to fit the context window; run the tool again if you need it]";
+
+/// What replaces the text arguments of old tool calls.
+const ELIDED_ARGUMENT: &str = "[removed to fit the context window]";
+
+/// Messages at the end of the conversation that are never trimmed: the
+/// model's latest turns and what it just saw.
+const KEEP_RECENT: usize = 6;
+
+/// Tool results shorter than this aren't worth trimming.
+const MIN_ELIDE_BYTES: usize = 300;
 
 /// Limits on one agent run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +61,35 @@ pub enum AgentError {
     /// The model kept stopping without calling its finishing tool.
     #[error("the agent stopped {0} times without finishing")]
     NoSubmission(u32),
+    /// The meter stopped the run between steps, e.g. because the project
+    /// was paused. The work isn't finished and didn't fail.
+    #[error("{0}")]
+    Stopped(String),
+    /// Token usage couldn't be checked or saved.
+    #[error("{0}")]
+    Meter(String),
+    /// Even with old output trimmed, the conversation doesn't fit the
+    /// model's context window.
+    #[error(
+        "the conversation needs about {needed} tokens but the model's context window is {window}; \
+         use a model with a bigger window (for Ollama, raise num_ctx) or lower max_tokens"
+    )]
+    ContextFull {
+        /// Estimated tokens of the smallest request that could be built.
+        needed: u64,
+        /// The model's context window.
+        window: u64,
+    },
+}
+
+impl From<MeterError> for AgentError {
+    fn from(error: MeterError) -> Self {
+        match error {
+            MeterError::Budget(e) => Self::Llm(LlmError::Budget(e)),
+            MeterError::Stopped(reason) => Self::Stopped(reason),
+            MeterError::Failed(message) => Self::Meter(message),
+        }
+    }
 }
 
 /// A finished run.
@@ -73,22 +123,23 @@ impl<'a> Agent<'a> {
 
     /// Runs `role` on `brief` until it hands in its work.
     ///
-    /// `budget` is the project's remaining budget; each call's usage is
-    /// recorded against it, and also passed to `on_usage` straight away so
-    /// the caller can persist it even if the run later fails.
+    /// Each call's worst-case size is reserved with `meter` before it is
+    /// sent, and its usage is settled with `meter` right after, so the
+    /// tokens are counted even if the run fails later.
     ///
     /// # Errors
     ///
     /// Returns [`AgentError::Llm`] if a model call fails or the budget
-    /// refuses it, [`AgentError::StepLimit`] if the step limit is reached,
-    /// or [`AgentError::NoSubmission`] if the model keeps stopping without
-    /// finishing.
+    /// refuses it, [`AgentError::Stopped`] if the meter stops the run,
+    /// [`AgentError::StepLimit`] if the step limit is reached,
+    /// [`AgentError::NoSubmission`] if the model keeps stopping without
+    /// finishing, or [`AgentError::ContextFull`] if the conversation can't
+    /// be made to fit the model.
     pub async fn run(
         &self,
         role: AgentRole,
         brief: impl Into<String>,
-        mut budget: TokenBudget,
-        mut on_usage: impl FnMut(Usage) + Send,
+        meter: &dyn UsageMeter,
     ) -> Result<AgentRun, AgentError> {
         let finish = Toolbox::finishing_tool(role);
         let mut conversation = Conversation {
@@ -96,14 +147,37 @@ impl<'a> Agent<'a> {
             messages: vec![Message::user(brief)],
             tools: self.toolbox.specs(role),
         };
+        let window = self.llm.context_window(role);
         let mut usage = Usage::default();
         let mut files = BTreeSet::new();
         let mut reminders = 0;
 
         for step in 1..=self.config.max_steps {
-            let response = self.llm.chat(role, &conversation, &budget).await?;
-            budget.record(response.usage.total());
-            on_usage(response.usage);
+            let mut request = self.llm.request(role, &conversation)?;
+            if let Some(window) = window {
+                let needed = estimate_request_tokens(&request);
+                if needed > window {
+                    fit(&mut conversation.messages, needed - window);
+                    request = self.llm.request(role, &conversation)?;
+                    let needed = estimate_request_tokens(&request);
+                    if needed > window {
+                        return Err(AgentError::ContextFull { needed, window });
+                    }
+                }
+            }
+            // Reserve the worst case: whatever happens next, the call can't
+            // cost more.
+            let bound = max_request_tokens(&request);
+            meter.reserve(bound).await?;
+            let result = self.llm.send(role, &request).await;
+            let spent = match &result {
+                Ok(response) => Some(response.usage),
+                Err(error) if error.is_unbilled() => Some(Usage::default()),
+                // Maybe billed, at an unknown cost: count the worst case.
+                Err(_) => None,
+            };
+            meter.settle(bound, spent).await?;
+            let response = result?;
             usage.input_tokens += response.usage.input_tokens;
             usage.output_tokens += response.usage.output_tokens;
             conversation.messages.push(response.to_message());
@@ -134,7 +208,10 @@ impl<'a> Agent<'a> {
                         .push(Message::tool_error(call, "not run: the task was already submitted"));
                     continue;
                 }
-                let outcome = self.toolbox.execute(role, call).await;
+                let mut outcome = self.toolbox.execute(role, call).await;
+                if let Some(window) = window {
+                    clip_result(&mut outcome.message, window);
+                }
                 if let Some(path) = outcome.wrote {
                     files.insert(path);
                 }
@@ -153,5 +230,153 @@ impl<'a> Agent<'a> {
             }
         }
         Err(AgentError::StepLimit(self.config.max_steps))
+    }
+}
+
+/// Trims the oldest tool output and tool-call text until about `excess`
+/// tokens are freed. The brief (the first message) and the last
+/// [`KEEP_RECENT`] messages are kept whole. Nothing is removed outright:
+/// results keep their call ids and arguments stay JSON objects.
+fn fit(messages: &mut [Message], excess: u64) {
+    let end = messages.len().saturating_sub(KEEP_RECENT);
+    let mut freed = 0_u64;
+    for message in messages.iter_mut().take(end).skip(1) {
+        if freed >= excess {
+            return;
+        }
+        match message {
+            Message::ToolResult { content, .. } if content.len() > MIN_ELIDE_BYTES => {
+                freed += hca_llm::estimate_tokens(content);
+                ELIDED_OUTPUT.clone_into(content);
+            }
+            Message::Assistant { tool_calls, .. } => {
+                for call in tool_calls {
+                    if let Some(arguments) = call.arguments.as_object_mut() {
+                        for value in arguments.values_mut() {
+                            if value.as_str().is_some_and(|text| text.len() > MIN_ELIDE_BYTES) {
+                                freed += hca_llm::estimate_tokens(value.as_str().unwrap_or_default());
+                                *value = serde_json::Value::String(ELIDED_ARGUMENT.to_owned());
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Shortens a single tool result that would take more than a quarter of
+/// the context window. Command output keeps its end, where errors are;
+/// anything else keeps its start.
+fn clip_result(message: &mut Message, window: u64) {
+    let Message::ToolResult { name, content, .. } = message else { return };
+    let limit = usize::try_from((window / 4).saturating_mul(3)).unwrap_or(usize::MAX);
+    if content.len() <= limit {
+        return;
+    }
+    let hidden = content.len() - limit;
+    if name == "run_command" {
+        let mut start = hidden;
+        while !content.is_char_boundary(start) {
+            start += 1;
+        }
+        *content = format!("[... {start} bytes cut to fit the context window ...]\n{}", &content[start..]);
+    } else {
+        let mut end = limit;
+        while !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        let rest = content.len() - end;
+        *content = format!(
+            "{}\n[... {rest} more bytes not shown, to fit the context window. Read the rest in parts with \
+             start_line and end_line.]",
+            &content[..end]
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hca_llm::ToolCall;
+    use serde_json::json;
+
+    use super::*;
+
+    fn call(id: &str, name: &str, arguments: serde_json::Value) -> ToolCall {
+        ToolCall { id: id.into(), name: name.into(), arguments }
+    }
+
+    #[test]
+    fn fitting_keeps_every_call_paired_with_its_result() {
+        let big = "x".repeat(3_000);
+        let mut messages = vec![Message::user("the brief")];
+        for i in 0..6 {
+            let write = call(&format!("w{i}"), "write_file", json!({"path": "a.py", "content": big}));
+            let read = call(&format!("r{i}"), "read_file", json!({"path": "a.py"}));
+            messages.push(Message::Assistant {
+                content: String::new(),
+                tool_calls: vec![write.clone(), read.clone()],
+            });
+            messages.push(Message::tool_result(&write, "wrote a.py"));
+            messages.push(Message::tool_result(&read, big.clone()));
+        }
+        let before = messages.clone();
+        fit(&mut messages, u64::MAX);
+
+        assert_eq!(messages.len(), before.len(), "no message is removed");
+        assert_eq!(messages[0], before[0], "the brief is kept");
+        let recent = before.len() - KEEP_RECENT;
+        assert_eq!(&messages[recent..], &before[recent..], "recent turns are kept");
+        for (now, was) in messages.iter().zip(&before) {
+            match (now, was) {
+                (Message::ToolResult { call_id: a, .. }, Message::ToolResult { call_id: b, .. }) => {
+                    assert_eq!(a, b);
+                }
+                (Message::Assistant { tool_calls: a, .. }, Message::Assistant { tool_calls: b, .. }) => {
+                    for (x, y) in a.iter().zip(b) {
+                        assert_eq!((&x.id, &x.name), (&y.id, &y.name));
+                        assert!(x.arguments.is_object());
+                        assert_eq!(x.arguments["path"], "a.py", "short arguments stay");
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Message::ToolResult { content, .. } = &messages[3] else { panic!("expected a result") };
+        assert_eq!(content, ELIDED_OUTPUT);
+        let Message::Assistant { tool_calls, .. } = &messages[1] else { panic!("expected a turn") };
+        assert_eq!(tool_calls[0].arguments["content"], ELIDED_ARGUMENT);
+    }
+
+    #[test]
+    fn fitting_stops_once_enough_is_freed() {
+        let big = "x".repeat(3_000);
+        let calls: Vec<_> =
+            (0..10).map(|i| call(&format!("c{i}"), "read_file", json!({"path": "a"}))).collect();
+        let mut messages = vec![Message::user("brief")];
+        messages.extend(calls.iter().map(|c| Message::tool_result(c, big.clone())));
+        fit(&mut messages, 1);
+        let elided = messages
+            .iter()
+            .filter(|m| matches!(m, Message::ToolResult { content, .. } if content == ELIDED_OUTPUT))
+            .count();
+        assert_eq!(elided, 1, "only as much as needed");
+    }
+
+    #[test]
+    fn huge_results_are_clipped_at_the_useful_end() {
+        let read = call("r", "read_file", json!({"path": "big.txt"}));
+        let mut message = Message::tool_result(&read, format!("START{}", "x".repeat(10_000)));
+        clip_result(&mut message, 1_000);
+        let Message::ToolResult { content, .. } = &message else { unreachable!() };
+        assert!(content.starts_with("START") && content.contains("start_line"), "{content}");
+        assert!(content.len() < 1_000);
+
+        let run = call("c", "run_command", json!({"command": "pytest"}));
+        let mut message = Message::tool_result(&run, format!("{}FAILED test_x", "y".repeat(10_000)));
+        clip_result(&mut message, 1_000);
+        let Message::ToolResult { content, .. } = &message else { unreachable!() };
+        assert!(content.ends_with("FAILED test_x"), "{content}");
     }
 }

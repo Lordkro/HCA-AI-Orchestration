@@ -3,7 +3,7 @@
 //! ```toml
 //! [providers.local]
 //! kind = "ollama"
-//! num_ctx = 16384
+//! num_ctx = 32768
 //!
 //! [providers.claude]
 //! kind = "anthropic"            # key read from ANTHROPIC_API_KEY
@@ -69,8 +69,10 @@ pub enum ProviderConfig {
         /// Defaults to `http://localhost:11434`.
         #[serde(default = "defaults::ollama_url")]
         base_url: String,
-        /// Context window in tokens. Unset uses Ollama's default, which is
-        /// usually too small for coding.
+        /// Context window in tokens. Unset means
+        /// [`DEFAULT_OLLAMA_NUM_CTX`]. HCA always sends it, so the window it
+        /// trims conversations to is exactly the one Ollama loads, never
+        /// Ollama's own (small, version-dependent) default.
         #[serde(default)]
         num_ctx: Option<u32>,
         /// Reasoning on or off for models that support it. Unset leaves the
@@ -115,8 +117,21 @@ pub enum ProviderConfig {
         /// Which field carries the output token limit.
         #[serde(default)]
         max_tokens_field: MaxTokensField,
+        /// The models' context window in tokens. Unset means
+        /// [`ASSUMED_CONTEXT_TOKENS`]: the server can't be asked, so HCA
+        /// assumes a window most local models have and trims conversations
+        /// to it. Set it to the real value.
+        #[serde(default)]
+        context_tokens: Option<u32>,
     },
 }
+
+/// The `num_ctx` HCA sends Ollama when none is configured.
+pub const DEFAULT_OLLAMA_NUM_CTX: u32 = 32_768;
+
+/// The context window assumed for an OpenAI-compatible server that doesn't
+/// set `context_tokens`.
+pub const ASSUMED_CONTEXT_TOKENS: u32 = 32_768;
 
 /// Retry policy for transport errors, 429s and 5xx responses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,37 +216,56 @@ impl LlmConfig {
             let (timeout, retry) = (self.timeout_secs, self.retry);
             let provider: Arc<dyn LlmProvider> = match config {
                 ProviderConfig::Ollama { base_url, num_ctx, think } => {
-                    Arc::new(OllamaProvider::new(base_url, *num_ctx, *think, retry, timeout)?)
+                    let num_ctx = num_ctx.unwrap_or(DEFAULT_OLLAMA_NUM_CTX);
+                    Arc::new(OllamaProvider::new(base_url, Some(num_ctx), *think, retry, timeout)?)
                 }
                 ProviderConfig::Anthropic { base_url, api_key_env } => {
                     Arc::new(AnthropicProvider::new(base_url, key(api_key_env)?, retry, timeout)?)
                 }
-                ProviderConfig::Openai { base_url, api_key_env } => Arc::new(OpenAiCompatibleProvider::new(
-                    name,
-                    base_url,
-                    Some(key(api_key_env)?),
-                    MaxTokensField::MaxCompletionTokens,
-                    retry,
-                    timeout,
-                )?),
-                ProviderConfig::Grok { base_url, api_key_env } => Arc::new(OpenAiCompatibleProvider::new(
-                    name,
-                    base_url,
-                    Some(key(api_key_env)?),
-                    MaxTokensField::MaxTokens,
-                    retry,
-                    timeout,
-                )?),
-                ProviderConfig::OpenaiCompatible { base_url, api_key_env, max_tokens_field } => {
-                    let api_key = api_key_env.as_deref().map(key).transpose()?;
-                    Arc::new(OpenAiCompatibleProvider::new(
+                // Current OpenAI and Grok chat models all take at least
+                // 128,000 tokens.
+                ProviderConfig::Openai { base_url, api_key_env } => Arc::new(
+                    OpenAiCompatibleProvider::new(
                         name,
                         base_url,
-                        api_key,
-                        *max_tokens_field,
+                        Some(key(api_key_env)?),
+                        MaxTokensField::MaxCompletionTokens,
                         retry,
                         timeout,
-                    )?)
+                    )?
+                    .with_context_window(Some(128_000)),
+                ),
+                ProviderConfig::Grok { base_url, api_key_env } => Arc::new(
+                    OpenAiCompatibleProvider::new(
+                        name,
+                        base_url,
+                        Some(key(api_key_env)?),
+                        MaxTokensField::MaxTokens,
+                        retry,
+                        timeout,
+                    )?
+                    .with_context_window(Some(128_000)),
+                ),
+                ProviderConfig::OpenaiCompatible {
+                    base_url,
+                    api_key_env,
+                    max_tokens_field,
+                    context_tokens,
+                } => {
+                    let api_key = api_key_env.as_deref().map(key).transpose()?;
+                    Arc::new(
+                        OpenAiCompatibleProvider::new(
+                            name,
+                            base_url,
+                            api_key,
+                            *max_tokens_field,
+                            retry,
+                            timeout,
+                        )?
+                        .with_context_window(Some(u64::from(
+                            context_tokens.unwrap_or(ASSUMED_CONTEXT_TOKENS),
+                        ))),
+                    )
                 }
             };
             providers.insert(name, provider);

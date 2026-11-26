@@ -144,6 +144,10 @@ impl LlmProvider for AnthropicProvider {
     fn chat<'a>(&'a self, request: &'a ChatRequest) -> BoxFuture<'a, Result<ChatResponse, LlmError>> {
         Box::pin(self.send(request))
     }
+    /// Every current Claude model accepts at least 200,000 tokens.
+    fn context_window(&self) -> Option<u64> {
+        Some(200_000)
+    }
 }
 
 #[derive(Deserialize)]

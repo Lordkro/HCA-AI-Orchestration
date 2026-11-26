@@ -860,6 +860,7 @@ version = "0.2.0-alpha.0"
 dependencies = [
  "anyhow",
  "axum",
+ "chrono",
  "clap",
  "hca-agents",
  "hca-core",
@@ -941,13 +942,20 @@ name = "hca-sandbox"
 version = "0.2.0-alpha.0"
 dependencies = [
  "bollard",
+ "bytes",
+ "form_urlencoded",
  "futures-util",
  "hca-agents",
  "hca-llm",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -24,6 +24,7 @@ pub struct OpenAiCompatibleProvider {
     max_tokens_field: MaxTokensField,
     retry: RetryConfig,
     client: reqwest::Client,
+    context_window: Option<u64>,
 }
 
 impl OpenAiCompatibleProvider {
@@ -48,7 +49,15 @@ impl OpenAiCompatibleProvider {
             max_tokens_field,
             retry,
             client: http_client(timeout_secs)?,
+            context_window: None,
         })
+    }
+
+    /// Sets the context window of the server's models, in tokens.
+    #[must_use]
+    pub fn with_context_window(mut self, tokens: Option<u64>) -> Self {
+        self.context_window = tokens;
+        self
     }
 
     fn body(&self, request: &ChatRequest) -> Value {
@@ -173,6 +182,9 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
     fn chat<'a>(&'a self, request: &'a ChatRequest) -> BoxFuture<'a, Result<ChatResponse, LlmError>> {
         Box::pin(self.send(request))
+    }
+    fn context_window(&self) -> Option<u64> {
+        self.context_window
     }
 }
 

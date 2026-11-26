@@ -132,6 +132,12 @@ pub(crate) async fn resume(State(state): State<AppState>, Path(id): Path<String>
     Ok(Json(json!({ "project_id": id, "status": status })))
 }
 
+pub(crate) async fn restart(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let id = parse(&id, "project")?;
+    let status = state.orchestrator.restart(id).await?;
+    Ok(Json(json!({ "project_id": id, "status": status })))
+}
+
 pub(crate) async fn cancel(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
     let id = parse(&id, "project")?;
     let status = state.orchestrator.cancel(id).await?;

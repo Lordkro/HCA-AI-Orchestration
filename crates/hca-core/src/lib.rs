@@ -27,6 +27,8 @@ pub use budget::{BudgetError, BudgetStatus, TokenBudget};
 pub use ids::{ProjectId, TaskId};
 pub use limits::{Limits, LimitsError};
 pub use plan::{assess, ready_tasks, validate_plan, PlanError, ProjectProgress};
-pub use project::{Project, ProjectEvent, ProjectFailure, ProjectStatus, ProjectTransitionError};
+pub use project::{
+    Project, ProjectEvent, ProjectFailure, ProjectStatus, ProjectTransitionError, Reservation,
+};
 pub use role::{AgentRole, ParseRoleError};
 pub use task::{FailureReason, Task, TaskEvent, TaskState, Transition, TransitionError};

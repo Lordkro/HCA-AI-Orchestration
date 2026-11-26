@@ -2,8 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use hca_core::{
-    validate_plan, Limits, PlanError, Project, ProjectEvent, ProjectId, ProjectStatus, Task, TaskEvent,
-    TaskId, TaskState, Transition,
+    validate_plan, Limits, PlanError, Project, ProjectEvent, ProjectId, ProjectStatus, Reservation, Task,
+    TaskEvent, TaskId, TaskState, Transition,
 };
 use sqlx::{Sqlite, SqliteConnection, Transaction};
 
@@ -176,8 +176,41 @@ impl Store {
         limits: &Limits,
         now: DateTime<Utc>,
     ) -> Result<bool> {
+        self.charge_usage(id, None, tokens, limits, now).await
+    }
+
+    /// Charges one model call's tokens to a project and, if given, the task
+    /// it was for, in one transaction, so the two totals always agree. If
+    /// that spends the budget, the project fails and its jobs are cancelled
+    /// in the same transaction.
+    ///
+    /// The task's `updated_at` is left alone: the task timeout is measured
+    /// from it, so recording spend must not reset it.
+    ///
+    /// Returns `true` while the project is still within budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::NotFound`] if the project or task doesn't exist.
+    pub async fn charge_usage(
+        &self,
+        id: ProjectId,
+        task: Option<TaskId>,
+        tokens: u64,
+        limits: &Limits,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
         let mut tx = self.writer.begin().await?;
         let mut project = load_project(&mut tx, id).await?;
+        if let Some(task_id) = task {
+            let mut task = load_task(&mut tx, task_id).await?;
+            task.record_tokens(tokens);
+            sqlx::query("UPDATE tasks SET data = ? WHERE id = ?")
+                .bind(serde_json::to_string(&task)?)
+                .bind(task_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        }
         let was_terminal = project.status().is_terminal();
         let within = project.charge_tokens(tokens, limits, now);
         save_project(&mut tx, &project).await?;
@@ -188,30 +221,110 @@ impl Store {
         Ok(within)
     }
 
-    /// Adds tokens to a task without changing its state or `updated_at`.
+    /// Reserves a model call's worst-case size against a project's budget,
+    /// before the call is made. See [`Project::reserve_tokens`].
     ///
-    /// The task timeout is measured from `updated_at`, so recording spend
-    /// must not reset it. A crash between this and [`charge_tokens`](Self::charge_tokens)
-    /// can count the tokens on the task twice after a retry; that is preferred
-    /// to dropping them.
+    /// A [`Reservation::Refused`] call can't fit even once every other call
+    /// settles, so the project fails as out of budget in the same
+    /// transaction, and its jobs are cancelled.
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::NotFound`] if there is no such task.
-    pub async fn add_task_tokens(&self, id: TaskId, tokens: u64) -> Result<()> {
-        if tokens == 0 {
-            return Ok(());
-        }
+    /// Returns [`StoreError::ProjectNotActive`] if the project doesn't
+    /// accept work (paused, or ended), or [`StoreError::NotFound`].
+    pub async fn reserve_usage(
+        &self,
+        id: ProjectId,
+        tokens: u64,
+        limits: &Limits,
+        now: DateTime<Utc>,
+    ) -> Result<Reservation> {
         let mut tx = self.writer.begin().await?;
-        let mut task = load_task(&mut tx, id).await?;
-        task.record_tokens(tokens);
-        sqlx::query("UPDATE tasks SET data = ? WHERE id = ?")
-            .bind(serde_json::to_string(&task)?)
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await?;
+        let mut project = load_project(&mut tx, id).await?;
+        if !project.accepts_work() {
+            return Err(StoreError::ProjectNotActive(project.status()));
+        }
+        let reservation = project.reserve_tokens(tokens, limits);
+        match reservation {
+            Reservation::Granted => save_project(&mut tx, &project).await?,
+            Reservation::Busy => return Ok(reservation),
+            Reservation::Refused(_) => {
+                project.exhaust_budget(now);
+                save_project(&mut tx, &project).await?;
+                crate::jobs::cancel_for_project(&mut tx, id, true, now).await?;
+            }
+        }
         tx.commit().await?;
-        Ok(())
+        Ok(reservation)
+    }
+
+    /// Settles a reservation made by [`reserve_usage`](Self::reserve_usage):
+    /// releases `reserved` and charges `charged` to the project and, if
+    /// given, the task, in one transaction. If that spends the budget, the
+    /// project fails and its jobs are cancelled.
+    ///
+    /// Returns `true` while the project is still within budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::NotFound`] if the project or task doesn't exist.
+    pub async fn settle_usage(
+        &self,
+        id: ProjectId,
+        task: Option<TaskId>,
+        reserved: u64,
+        charged: u64,
+        limits: &Limits,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let mut tx = self.writer.begin().await?;
+        let mut project = load_project(&mut tx, id).await?;
+        if let Some(task_id) = task {
+            let mut task = load_task(&mut tx, task_id).await?;
+            task.record_tokens(charged);
+            sqlx::query("UPDATE tasks SET data = ? WHERE id = ?")
+                .bind(serde_json::to_string(&task)?)
+                .bind(task_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        }
+        let was_terminal = project.status().is_terminal();
+        let within = project.settle_tokens(reserved, charged, limits, now);
+        save_project(&mut tx, &project).await?;
+        if !was_terminal && project.status().is_terminal() {
+            crate::jobs::cancel_for_project(&mut tx, id, true, now).await?;
+        }
+        tx.commit().await?;
+        Ok(within)
+    }
+
+    /// Charges in full every reservation left open by a process that
+    /// stopped mid-call. Run at startup, before any worker. A project this
+    /// pushes out of budget fails, and its jobs are cancelled.
+    ///
+    /// Returns how many projects had open reservations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Database`] on failure.
+    pub async fn charge_open_reservations(&self, limits: &Limits, now: DateTime<Utc>) -> Result<usize> {
+        let mut charged = 0;
+        for listed in self.projects(None).await? {
+            if listed.tokens_reserved() == 0 {
+                continue;
+            }
+            let mut tx = self.writer.begin().await?;
+            let mut project = load_project(&mut tx, listed.id).await?;
+            let was_terminal = project.status().is_terminal();
+            project.charge_reservations(limits, now);
+            save_project(&mut tx, &project).await?;
+            if !was_terminal && project.status().is_terminal() {
+                crate::jobs::cancel_for_project(&mut tx, project.id, true, now).await?;
+            }
+            tx.commit().await?;
+            charged += 1;
+        }
+        Ok(charged)
     }
 
     /// Validates a plan with the core rules and saves all of its tasks, or

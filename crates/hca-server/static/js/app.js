@@ -260,6 +260,18 @@ async function cancelProject() {
     }
 }
 
+async function restartProject() {
+    if (!currentProjectId) return;
+    if (!window.confirm('Restart this project? Failed tasks start over with fresh retries.')) return;
+    try {
+        await apiFetch(`/api/projects/${currentProjectId}/restart`, { method: 'POST' });
+        await loadProjectDetail(currentProjectId);
+        loadProjects();
+    } catch (err) {
+        alert(`Failed to restart project: ${err.message}`);
+    }
+}
+
 async function togglePause() {
     if (!currentProjectId) return;
 
@@ -393,6 +405,7 @@ function renderProjectDetail(data) {
 
     const cancel = document.getElementById('btnCancel');
     cancel.style.display = (project.status === 'active' || project.status === 'paused') ? '' : 'none';
+    document.getElementById('btnRestart').style.display = project.status === 'failed' ? '' : 'none';
 
     // Progress
     if (progress) {

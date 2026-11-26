@@ -15,9 +15,11 @@
 //! that follows it commit in one transaction, and every limit from
 //! `hca-core` applies, so a project always ends.
 
+mod meter;
 mod status;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -65,10 +67,16 @@ pub struct OrchestratorConfig {
     pub workspaces_dir: PathBuf,
     /// Attempts per job for retryable failures (network, rate limits).
     pub job_attempts: u32,
-    /// Wait before retrying a job.
+    /// Wait before the first retry of a job; it doubles with each further
+    /// attempt, up to 10 minutes.
     pub retry_delay: chrono::Duration,
     /// Token budget for the brief given to each agent run.
     pub brief_tokens: u64,
+    /// Longest an agent run may take, from its first model call to its
+    /// submission. A run past it fails as timed out. This is the bound on a
+    /// running agent; [`Limits::task_timeout_minutes`] is the bound on a
+    /// task that has no job working on it.
+    pub run_timeout: Duration,
 }
 
 impl OrchestratorConfig {
@@ -81,9 +89,10 @@ impl OrchestratorConfig {
             lease: chrono::Duration::minutes(15),
             poll_interval: Duration::from_secs(1),
             workspaces_dir: workspaces_dir.into(),
-            job_attempts: 3,
+            job_attempts: 5,
             retry_delay: chrono::Duration::seconds(30),
             brief_tokens: 8_000,
+            run_timeout: Duration::from_hours(2),
         }
     }
 }
@@ -135,6 +144,8 @@ enum JobError {
     LeaseLost,
     /// The project was paused. The job goes back on the queue.
     Paused,
+    /// HCA is shutting down. The job goes back on the queue.
+    Shutdown,
     Store(StoreError),
 }
 
@@ -167,7 +178,13 @@ pub struct Orchestrator {
     config: OrchestratorConfig,
     events: broadcast::Sender<Value>,
     board: Mutex<status::StatusBoard>,
+    last_timeout_scan: Mutex<Option<DateTime<Utc>>>,
+    /// Set by [`begin_shutdown`](Orchestrator::begin_shutdown).
+    stopping: AtomicBool,
 }
+
+/// How often workers look for timed-out tasks.
+const TIMEOUT_SCAN_INTERVAL: chrono::Duration = chrono::Duration::seconds(30);
 
 impl Orchestrator {
     /// An orchestrator using `store`, `llm` and, if given, a sandboxed
@@ -179,7 +196,16 @@ impl Orchestrator {
         config: OrchestratorConfig,
     ) -> Self {
         let (events, _) = broadcast::channel(1024);
-        Self { store, llm, runner, config, events, board: Mutex::default() }
+        Self {
+            store,
+            llm,
+            runner,
+            config,
+            events,
+            board: Mutex::default(),
+            last_timeout_scan: Mutex::default(),
+            stopping: AtomicBool::new(false),
+        }
     }
 
     /// The store.
@@ -309,6 +335,55 @@ impl Orchestrator {
         Ok(status)
     }
 
+    /// Restarts a failed project, as a person's decision: the project is
+    /// active again, every failed task starts over with fresh retries, and
+    /// planning runs again if there is no plan yet. Work that was in flight
+    /// when the project failed gets its job back.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError::Conflict`] if the project isn't failed
+    /// or its token budget is spent under the current limits (raise
+    /// `project_token_budget` first), or a store error.
+    pub async fn restart(&self, id: ProjectId) -> Result<ProjectStatus, OrchestratorError> {
+        let project = self.store.project(id).await?;
+        if project.status() != ProjectStatus::Failed {
+            return Err(OrchestratorError::Conflict(format!(
+                "only a failed project can be restarted; this one is {}",
+                format!("{:?}", project.status()).to_lowercase()
+            )));
+        }
+        let budget = project.budget(&self.config.limits);
+        if budget.is_exhausted() {
+            return Err(OrchestratorError::Conflict(format!(
+                "the token budget is spent ({} of {} tokens); raise project_token_budget in [limits] and \
+                 restart HCA before restarting the project",
+                budget.used(),
+                budget.limit()
+            )));
+        }
+        let now = Utc::now();
+        let status = self.store.apply_project_event(id, ProjectEvent::Reopen, now).await?;
+        let mut reopened = 0;
+        for task in self.store.tasks(id).await? {
+            if task.state() != TaskState::Failed {
+                continue;
+            }
+            let transition =
+                self.store.apply_task_event(task.id, TaskEvent::Reopen, &self.config.limits, now).await?;
+            self.emit_task(&task, transition);
+            reopened += 1;
+        }
+        let note = match reopened {
+            0 => "Project restarted by a person.".to_owned(),
+            1 => "Project restarted by a person; 1 failed task starts over.".to_owned(),
+            n => format!("Project restarted by a person; {n} failed tasks start over."),
+        };
+        self.after_project_change(id, &note).await;
+        self.repair(id, now).await?;
+        Ok(status)
+    }
+
     /// Retries a failed task, if it has a retry left.
     ///
     /// # Errors
@@ -396,6 +471,14 @@ impl Orchestrator {
     // Running
     // ------------------------------------------------------------------
 
+    /// Asks running agents to stop: each finishes the model call it is in,
+    /// then its job goes back on the queue with its attempt given back.
+    /// Workers stop claiming jobs once `shutdown` (see
+    /// [`spawn_workers`](Self::spawn_workers)) is set too.
+    pub fn begin_shutdown(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+    }
+
     /// Starts `config.workers` workers that process jobs until `shutdown`
     /// becomes `true`.
     pub fn spawn_workers(self: &Arc<Self>, shutdown: &watch::Receiver<bool>) -> Vec<JoinHandle<()>> {
@@ -431,8 +514,10 @@ impl Orchestrator {
     ///
     /// Returns a store error if the job couldn't be claimed or settled.
     pub async fn step(&self, worker: &str) -> Result<bool, OrchestratorError> {
-        self.enforce_timeouts(Utc::now()).await?;
         let now = Utc::now();
+        if self.timeout_check_due(now) {
+            self.enforce_timeouts(now).await?;
+        }
         let Some(job) = self.store.claim(worker, &[], self.config.lease, now).await? else {
             return Ok(false);
         };
@@ -449,8 +534,9 @@ impl Orchestrator {
                 Ok(()) | Err(StoreError::LeaseLost(_)) => {}
                 Err(other) => return Err(other.into()),
             },
-            Err(JobError::Paused) => {
-                tracing::info!(job = %job.id, "job returned to the queue: project paused");
+            Err(reason @ (JobError::Paused | JobError::Shutdown)) => {
+                let why = if matches!(reason, JobError::Paused) { "project paused" } else { "shutting down" };
+                tracing::info!(job = %job.id, why, "job returned to the queue");
                 match self.store.release(job.id, worker, Utc::now()).await {
                     Ok(()) | Err(StoreError::LeaseLost(_)) => {}
                     Err(other) => return Err(other.into()),
@@ -467,7 +553,8 @@ impl Orchestrator {
 
     async fn retry_or_bury(&self, job: &Job, worker: &str, message: &str) -> Result<(), OrchestratorError> {
         tracing::warn!(job = %job.id, %message, "job failed");
-        match self.store.fail(job.id, worker, message, self.config.retry_delay, Utc::now()).await {
+        let delay = backoff(self.config.retry_delay, job.attempts);
+        match self.store.fail(job.id, worker, message, delay, Utc::now()).await {
             Ok(JobStatus::Dead) => self.job_dead(job, message).await,
             Ok(_) | Err(StoreError::LeaseLost(_)) => Ok(()),
             Err(other) => Err(other.into()),
@@ -487,53 +574,61 @@ impl Orchestrator {
         Ok(processed)
     }
 
-    /// Repairs state after a restart: queues planning for projects without
-    /// a plan, queues work for in-flight tasks that lost their job, and
-    /// dispatches what's ready.
+    /// Repairs state after a restart: requeues jobs the previous process
+    /// was running, queues planning for projects without a plan, queues work
+    /// for in-flight tasks that lost their job, and dispatches what's ready.
+    ///
+    /// Call it once at startup, before [`spawn_workers`](Self::spawn_workers):
+    /// it treats every running job as orphaned.
     ///
     /// # Errors
     ///
     /// Returns a store error.
     pub async fn recover(&self) -> Result<(), OrchestratorError> {
         let now = Utc::now();
+        let orphans = self.store.requeue_orphans(now).await?;
+        if orphans > 0 {
+            tracing::info!(orphans, "requeued jobs the previous run was working on");
+        }
+        // Calls that were in flight when the last process stopped may have
+        // been billed; count them in full.
+        let reserved = self.store.charge_open_reservations(&self.config.limits, now).await?;
+        if reserved > 0 {
+            tracing::info!(projects = reserved, "charged model calls cut off by the last stop");
+        }
         for project in self.store.projects(Some(ProjectStatus::Active)).await? {
-            let open: Vec<Job> = self
-                .store
-                .jobs(project.id, None)
-                .await?
-                .into_iter()
-                .filter(|j| matches!(j.status, JobStatus::Queued | JobStatus::Running))
-                .collect();
-            let tasks = self.store.tasks(project.id).await?;
-            if tasks.is_empty() && !open.iter().any(|j| j.kind == JOB_PLAN) {
-                self.store.enqueue(&self.job(project.id, None, JOB_PLAN, json!({}), now), now).await?;
-            }
-            for task in tasks.iter().filter(|t| t.state().is_in_flight()) {
-                if open.iter().any(|j| j.task_id == Some(task.id)) {
-                    continue;
-                }
-                let job = if task.state() == TaskState::Review {
-                    let summary = self
-                        .store
-                        .latest_activity(task.id, "deliverable")
-                        .await?
-                        .map_or_else(|| "(summary lost in a restart)".into(), |a| a.entry.content);
-                    self.job(
-                        project.id,
-                        Some(task.id),
-                        JOB_REVIEW,
-                        json!({ "summary": summary, "files": [] }),
-                        now,
-                    )
-                } else {
-                    self.job(project.id, Some(task.id), JOB_WORK, json!({}), now)
-                };
-                self.store.enqueue(&job, now).await?;
-            }
-            self.advance(project.id).await?;
+            self.repair(project.id, now).await?;
         }
         self.enforce_timeouts(Utc::now()).await?;
         Ok(())
+    }
+
+    /// Makes sure an active project has the jobs its state calls for:
+    /// planning if it has no plan, and a job for every in-flight task that
+    /// lost its own. Then dispatches whatever is ready.
+    async fn repair(&self, project: ProjectId, now: DateTime<Utc>) -> Result<(), OrchestratorError> {
+        let open: Vec<Job> = self.store.open_jobs(project).await?;
+        let tasks = self.store.tasks(project).await?;
+        if tasks.is_empty() && !open.iter().any(|j| j.kind == JOB_PLAN) {
+            self.store.enqueue(&self.job(project, None, JOB_PLAN, json!({}), now), now).await?;
+        }
+        for task in tasks.iter().filter(|t| t.state().is_in_flight()) {
+            if open.iter().any(|j| j.task_id == Some(task.id)) {
+                continue;
+            }
+            let job = if task.state() == TaskState::Review {
+                let summary = self
+                    .store
+                    .latest_activity(task.id, "deliverable")
+                    .await?
+                    .map_or_else(|| "(summary lost in a restart)".into(), |a| a.entry.content);
+                self.job(project, Some(task.id), JOB_REVIEW, json!({ "summary": summary, "files": [] }), now)
+            } else {
+                self.job(project, Some(task.id), JOB_WORK, json!({}), now)
+            };
+            self.store.enqueue(&job, now).await?;
+        }
+        self.advance(project).await
     }
 
     /// Fails in-flight tasks that have no queued or running job and have sat
@@ -549,14 +644,8 @@ impl Orchestrator {
     pub async fn enforce_timeouts(&self, now: DateTime<Utc>) -> Result<(), OrchestratorError> {
         use std::collections::HashSet;
         for project in self.store.projects(Some(ProjectStatus::Active)).await? {
-            let live: HashSet<TaskId> = self
-                .store
-                .jobs(project.id, None)
-                .await?
-                .into_iter()
-                .filter(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
-                .filter_map(|job| job.task_id)
-                .collect();
+            let live: HashSet<TaskId> =
+                self.store.open_jobs(project.id).await?.into_iter().filter_map(|job| job.task_id).collect();
             let mut timed_out = false;
             for task in self.store.tasks(project.id).await? {
                 if live.contains(&task.id) || !task.is_timed_out(&self.config.limits, now) {
@@ -578,6 +667,18 @@ impl Orchestrator {
             }
         }
         Ok(())
+    }
+
+    /// Whether the periodic timeout scan should run now. Timeouts are
+    /// measured in minutes, so scanning more often than
+    /// [`TIMEOUT_SCAN_INTERVAL`] only costs queries.
+    fn timeout_check_due(&self, now: DateTime<Utc>) -> bool {
+        let mut last = self.last_timeout_scan.lock().unwrap_or_else(PoisonError::into_inner);
+        if last.is_some_and(|at| now - at < TIMEOUT_SCAN_INTERVAL) {
+            return false;
+        }
+        *last = Some(now);
+        true
     }
 
     /// Paused work goes back on the queue. Finished projects drop it.
@@ -783,7 +884,7 @@ impl Orchestrator {
                 Submission::Work { summary } => {
                     let files = run.files_written.clone();
                     let payload = json!({ "summary": summary, "files": files });
-                    let (transition, _) = self
+                    let result = self
                         .store
                         .apply_task_event_with_job(
                             task_id,
@@ -792,7 +893,9 @@ impl Orchestrator {
                             now,
                             |_, t| Some(self.job(t.project_id, Some(t.id), JOB_REVIEW, payload, now)),
                         )
-                        .await?;
+                        .await
+                        .map(|(transition, _)| transition);
+                    let Some(transition) = settled(result)? else { return Ok(()) };
                     self.emit_task(&task, transition);
                     let files_line = if files.is_empty() {
                         String::new()
@@ -843,6 +946,8 @@ impl Orchestrator {
 
         let brief = self.review_brief(&task, summary, &files);
         let workspace = self.workspace(project.id)?;
+        // Nothing the coder left running can change the files under review:
+        // its run's session ended before the work was submitted.
         let label = format!("Reviewing '{}'", task.title);
         let outcome =
             self.run_agent(AgentRole::Critic, &project, Some(task_id), label, workspace, brief).await?;
@@ -855,10 +960,11 @@ impl Orchestrator {
         match outcome {
             RunOutcome::Done(run) => match run.submission {
                 Submission::Review(review) if review.verdict == Verdict::Approve => {
-                    let transition = self
+                    let result = self
                         .store
                         .apply_task_event(task_id, TaskEvent::Approve, &self.config.limits, now)
-                        .await?;
+                        .await;
+                    let Some(transition) = settled(result)? else { return Ok(()) };
                     self.emit_task(&task, transition);
                     let note = if review.feedback.trim().is_empty() {
                         "Approved.".to_owned()
@@ -869,12 +975,14 @@ impl Orchestrator {
                 }
                 Submission::Review(review) => {
                     let event = TaskEvent::RequestRevision { feedback: review.feedback.clone() };
-                    let (transition, _) = self
+                    let result = self
                         .store
                         .apply_task_event_with_job(task_id, event, &self.config.limits, now, |t, task| {
                             self.revision_job(*t, task, now)
                         })
-                        .await?;
+                        .await
+                        .map(|(transition, _)| transition);
+                    let Some(transition) = settled(result)? else { return Ok(()) };
                     self.emit_task(&task, transition);
                     self.log(project.id, Some(task_id), "critic", &owner, "feedback", &review.feedback).await;
                     if transition.to == TaskState::Failed {
@@ -1022,38 +1130,53 @@ impl Orchestrator {
         workspace: Workspace,
         brief: String,
     ) -> Result<RunOutcome, JobError> {
-        let mut toolbox = Toolbox::new(workspace, self.runner.clone(), self.config.limits);
+        let run_id = self.board.lock().unwrap_or_else(PoisonError::into_inner).start(role, label);
+        // Every run gets its own sandbox session: processes it starts never
+        // meet another run's, and all of them stop when it ends.
+        // Startup removes every container of an earlier process, so run ids
+        // that restart from 1 never meet an old session.
+        let session = format!("run{run_id}");
+        let root = workspace.root().to_path_buf();
+        let mut toolbox =
+            Toolbox::new(workspace, self.runner.clone(), self.config.limits).with_session(session.clone());
         if role == AgentRole::Critic {
             toolbox = toolbox.with_command_user(CRITIC_USER);
         }
         let agent = Agent::new(&self.llm, &toolbox, self.config.agent);
-        let mut tokens = 0u64;
-        let mut calls = 0u64;
-        let run_id = self.board.lock().unwrap_or_else(PoisonError::into_inner).start(role, label);
-        let result = agent
-            .run(role, brief, project.budget(&self.config.limits), |usage| {
-                tokens += usage.total();
-                calls += 1;
-            })
-            .await;
-        self.board.lock().unwrap_or_else(PoisonError::into_inner).finish(role, run_id, calls, tokens);
-
-        if tokens > 0 {
-            if let Some(task_id) = task_id {
-                self.store.add_task_tokens(task_id, tokens).await?;
-            }
-            let within =
-                self.store.charge_tokens(project.id, tokens, &self.config.limits, Utc::now()).await?;
-            if !within {
-                self.after_project_change(project.id, "Token budget spent. Project stopped.").await;
+        // Closes the run on the status board when dropped, however the run
+        // ends.
+        let meter = meter::ProjectMeter::new(self, project.id, task_id, role, run_id);
+        let deadline = self.config.run_timeout;
+        let result = tokio::time::timeout(deadline, agent.run(role, brief, &meter)).await;
+        // Before anything is handed on: once the caller records a
+        // submission, the review job is queued, and the critic must not
+        // start while this run's processes still run.
+        if let Some(runner) = &self.runner {
+            if let Err(error) = runner.end_session(&root, &session).await {
+                return Err(JobError::Retry(format!("could not stop the run's sandbox processes: {error}")));
             }
         }
+        let Ok(result) = result else {
+            let minutes = deadline.as_secs() / 60;
+            let message = format!("the agent run took longer than {minutes} minutes");
+            return Ok(RunOutcome::Failed(FailureReason::Timeout, message));
+        };
         match result {
             Ok(run) => Ok(RunOutcome::Done(Box::new(run))),
             Err(AgentError::Llm(LlmError::Budget(e))) => {
                 Ok(RunOutcome::Failed(FailureReason::BudgetExhausted, e.to_string()))
             }
             Err(AgentError::Llm(e)) if e.is_retryable() => Err(JobError::Retry(e.to_string())),
+            Err(AgentError::Meter(message)) => Err(JobError::Retry(message)),
+            Err(AgentError::Stopped(reason)) => Err(if reason == meter::STOP_SHUTDOWN {
+                JobError::Shutdown
+            } else if reason == meter::STOP_PAUSED {
+                JobError::Paused
+            } else {
+                // The project ended while the agent ran (or just now, out
+                // of budget); its jobs are already cancelled.
+                JobError::LeaseLost
+            }),
             Err(e) => Ok(RunOutcome::Failed(FailureReason::AgentError(e.to_string()), e.to_string())),
         }
     }
@@ -1183,6 +1306,20 @@ impl Orchestrator {
         self.log(id, None, "system", "user", "status_update", message).await;
         if let Ok(project) = self.store.project(id).await {
             self.emit_project(&project);
+            if project.status().is_terminal() {
+                self.release_sandbox(id).await;
+            }
+        }
+    }
+
+    /// Removes a finished project's sandbox containers. The files stay.
+    async fn release_sandbox(&self, id: ProjectId) {
+        let Some(runner) = &self.runner else { return };
+        let path = self.workspace_path(id);
+        // The sandbox knows workspaces by their resolved path.
+        let path = path.canonicalize().unwrap_or(path);
+        if let Err(error) = runner.remove(&path).await {
+            tracing::warn!(%error, project = %id, "could not remove the project's sandbox");
         }
     }
 
@@ -1241,6 +1378,31 @@ impl Orchestrator {
     }
 }
 
+/// The outcome of applying an agent's result to a task that may have moved
+/// on while the agent ran: a person approved or rejected it, or the project
+/// was paused or finished. Those aren't job failures, so they don't use up
+/// an attempt. `None` means there's nothing left to do.
+fn settled(result: Result<Transition, StoreError>) -> Result<Option<Transition>, JobError> {
+    match result {
+        Ok(transition) => Ok(Some(transition)),
+        Err(StoreError::ProjectNotActive(ProjectStatus::Paused)) => Err(JobError::Paused),
+        Err(StoreError::Task(_) | StoreError::ProjectNotActive(_)) => Ok(None),
+        Err(other) => Err(other.into()),
+    }
+}
+
+/// The wait before retrying a job that has failed `attempts` times:
+/// `base`, doubling with each attempt, at most [`MAX_RETRY_DELAY`]. With the
+/// defaults (30 s, 5 attempts) a job rides out about 7 minutes of a model
+/// provider being down before it gives up.
+fn backoff(base: chrono::Duration, attempts: u32) -> chrono::Duration {
+    let factor = 1_i32 << attempts.saturating_sub(1).min(10);
+    (base * factor).min(MAX_RETRY_DELAY)
+}
+
+/// The longest wait between retries of a job.
+const MAX_RETRY_DELAY: chrono::Duration = chrono::Duration::minutes(10);
+
 fn role_name(task: &Task) -> String {
     task.assignee().or(task.role).unwrap_or(AgentRole::Coder).as_str().to_owned()
 }
@@ -1265,5 +1427,19 @@ fn percent(part: u64, whole: u64) -> f64 {
         0.0
     } else {
         (part as f64 / whole as f64 * 1000.0).round() / 10.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retries_back_off_exponentially_up_to_a_cap() {
+        let base = chrono::Duration::seconds(30);
+        let waits: Vec<i64> = (1..=6).map(|attempt| backoff(base, attempt).num_seconds()).collect();
+        assert_eq!(waits, vec![30, 60, 120, 240, 480, 600]);
+        assert_eq!(backoff(base, 0), base);
+        assert_eq!(backoff(base, u32::MAX), MAX_RETRY_DELAY);
     }
 }

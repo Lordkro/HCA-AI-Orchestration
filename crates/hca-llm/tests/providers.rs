@@ -1,6 +1,7 @@
 //! Wire-format tests: each provider against a mock HTTP server.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use hca_core::{AgentRole, BudgetError, TokenBudget};
 use hca_llm::{
@@ -254,6 +255,31 @@ async fn server_errors_are_retried_then_succeed() {
 }
 
 #[tokio::test]
+async fn timeouts_are_not_retried_because_they_may_have_been_billed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(openai_reply()).set_delay(Duration::from_secs(3)),
+        )
+        .mount(&server)
+        .await;
+    let provider =
+        ProviderConfig::Grok { base_url: format!("{}/v1", server.uri()), api_key_env: "XAI_API_KEY".into() };
+    let mut cfg = config(provider, "grok-4");
+    cfg.timeout_secs = 1;
+    let err = cfg.build_with_env(env).unwrap().chat(ROLE, &conversation(), &budget()).await.unwrap_err();
+    assert!(err.is_retryable() && !err.is_unbilled(), "{err:?}");
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "a retry would hide the first attempt's cost"
+    );
+
+    let refused = LlmError::Status { provider: "p".into(), status: 503, body: String::new() };
+    assert!(refused.is_unbilled(), "error statuses aren't billed, so they are retried");
+}
+
+#[tokio::test]
 async fn client_errors_are_not_retried() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -349,4 +375,57 @@ async fn unconfigured_roles_are_refused() {
     let llm = Llm::new(std::collections::HashMap::new());
     let err = llm.chat(AgentRole::Critic, &Conversation::default(), &budget()).await.unwrap_err();
     assert!(matches!(err, LlmError::NoModelForRole(AgentRole::Critic)));
+}
+
+#[test]
+fn research_and_spec_fall_back_to_the_coder_model() {
+    let ollama = ProviderConfig::Ollama { base_url: "http://x".into(), num_ctx: Some(32_768), think: None };
+    let llm = config(ollama, "qwen2.5-coder").build_with_env(env).unwrap();
+    assert_eq!(llm.role(AgentRole::Research).unwrap().model, "qwen2.5-coder");
+    assert_eq!(llm.role(AgentRole::Spec).unwrap().model, "qwen2.5-coder");
+    assert!(llm.role(AgentRole::Critic).is_none(), "only work roles fall back");
+    assert_eq!(llm.context_window(AgentRole::Research), Some(32_768), "num_ctx is the window");
+}
+
+#[test]
+fn cloud_providers_report_a_context_window() {
+    let claude =
+        ProviderConfig::Anthropic { base_url: "http://x".into(), api_key_env: "ANTHROPIC_API_KEY".into() };
+    let llm = config(claude, "claude-opus-5-5").build_with_env(env).unwrap();
+    assert_eq!(llm.context_window(ROLE), Some(200_000));
+    let compatible = ProviderConfig::OpenaiCompatible {
+        base_url: "http://x/v1".into(),
+        api_key_env: None,
+        max_tokens_field: hca_llm::MaxTokensField::default(),
+        context_tokens: None,
+    };
+    let llm = config(compatible, "m").build_with_env(env).unwrap();
+    assert_eq!(
+        llm.context_window(ROLE),
+        Some(u64::from(hca_llm::ASSUMED_CONTEXT_TOKENS)),
+        "assumed, so conversations are still trimmed"
+    );
+}
+
+#[tokio::test]
+async fn ollama_always_gets_a_context_size() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "message": {"role": "assistant", "content": "hi"},
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 1,
+            "eval_count": 1
+        })))
+        .mount(&server)
+        .await;
+    let provider = ProviderConfig::Ollama { base_url: server.uri(), num_ctx: None, think: None };
+    let llm = config(provider, "qwen3:8b").build_with_env(env).unwrap();
+    llm.chat(ROLE, &conversation(), &budget()).await.unwrap();
+
+    let sent = sent_body(&server).await["options"]["num_ctx"].as_u64();
+    assert_eq!(sent, Some(u64::from(hca_llm::DEFAULT_OLLAMA_NUM_CTX)), "never Ollama's own default");
+    assert_eq!(llm.context_window(ROLE), sent, "the window HCA trims to is the one Ollama loads");
 }

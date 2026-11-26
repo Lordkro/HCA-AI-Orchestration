@@ -10,8 +10,13 @@ use crate::{LlmError, RetryConfig};
 /// Most characters of an error body kept in [`LlmError::Status`].
 const MAX_ERROR_BODY: usize = 2_000;
 
-/// POSTs `body` and decodes the JSON response, retrying transport errors,
-/// 429s and 5xx responses with exponential backoff.
+/// POSTs `body` and decodes the JSON response, retrying connection
+/// failures, 429s and 5xx responses with exponential backoff.
+///
+/// Only errors the provider certainly didn't bill are retried here
+/// ([`LlmError::is_unbilled`]). A timeout may have been billed, and the
+/// caller only learns the usage of the attempt that answered, so it goes
+/// back to the caller, which counts the call's full worst case.
 pub(crate) async fn post_json<T: DeserializeOwned>(
     provider: &str,
     retry: &RetryConfig,
@@ -22,7 +27,7 @@ pub(crate) async fn post_json<T: DeserializeOwned>(
     loop {
         let result = send_once(provider, build().json(body)).await;
         match result {
-            Err(err) if err.is_retryable() && attempt < retry.max_retries => {
+            Err(err) if err.is_retryable() && err.is_unbilled() && attempt < retry.max_retries => {
                 let delay = retry.base_delay_ms.saturating_mul(1 << attempt.min(16));
                 tokio::time::sleep(Duration::from_millis(delay)).await;
                 attempt += 1;

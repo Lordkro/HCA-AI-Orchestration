@@ -29,13 +29,13 @@ cargo doc --no-deps --locked
 
 Clippy runs with the `pedantic` group on, so fix lints rather than silencing them. If an `allow` is really needed, put it on the smallest item and add a comment saying why.
 
-The real-Docker sandbox test is ignored by default. Run it when you change `hca-sandbox`:
+The real-Docker sandbox tests are ignored by default. Run them when you change `hca-sandbox`:
 
 ```sh
 cargo test -p hca-sandbox -- --ignored
 ```
 
-CI also builds both Docker images, runs that test and validates `docker-compose.yml`.
+CI also builds both Docker images, runs those tests and validates `docker-compose.yml`.
 
 ## Layout
 

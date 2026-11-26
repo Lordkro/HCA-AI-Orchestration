@@ -24,15 +24,21 @@ use hca_llm::{Message, ToolCall, ToolSpec};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{CommandRunner, Plan, Review, Submission, SubmitArgs, Verdict, Workspace};
+use crate::{CommandRunner, Plan, Review, Session, Submission, SubmitArgs, Verdict, Workspace};
 
 /// Characters of command output shown to the model.
 const MAX_COMMAND_OUTPUT: usize = 12_000;
 
 #[derive(Deserialize, JsonSchema)]
-struct PathArgs {
+struct ReadArgs {
     /// Path relative to the project root, e.g. `src/main.py`.
     path: String,
+    /// First line to return, counting from 1. Defaults to the first line.
+    #[serde(default)]
+    start_line: Option<usize>,
+    /// Last line to return, inclusive. Defaults to the last line.
+    #[serde(default)]
+    end_line: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -89,13 +95,23 @@ pub struct Toolbox {
     limits: Limits,
     /// `uid:gid` passed to `run_command` for the critic only.
     command_user: Option<String>,
+    /// The [`Session`] commands run in.
+    session: String,
 }
 
 impl Toolbox {
     /// Tools working in `workspace`. Without a `runner`, no role gets
     /// `run_command`.
     pub fn new(workspace: Workspace, runner: Option<Arc<dyn CommandRunner>>, limits: Limits) -> Self {
-        Self { workspace, runner, limits, command_user: None }
+        Self { workspace, runner, limits, command_user: None, session: String::new() }
+    }
+
+    /// Runs commands in session `id`, apart from every other session's
+    /// processes. See [`CommandRunner::end_session`].
+    #[must_use]
+    pub fn with_session(mut self, id: impl Into<String>) -> Self {
+        self.session = id.into();
+        self
     }
 
     /// Runs the critic's commands as `user` (`uid:gid`).
@@ -189,8 +205,12 @@ impl Toolbox {
                 Ok(if entries.is_empty() { "(no files yet)".into() } else { entries.join("\n") })
             }
             "read_file" => {
-                let args: PathArgs = call.parse()?;
-                ws.read(&args.path).await.map_err(|e| e.to_string())
+                let args: ReadArgs = call.parse()?;
+                let text = ws.read(&args.path).await.map_err(|e| e.to_string())?;
+                if args.start_line.is_none() && args.end_line.is_none() {
+                    return Ok(text);
+                }
+                line_range(&text, args.start_line, args.end_line)
             }
             "write_file" => {
                 let args: WriteArgs = call.parse()?;
@@ -209,7 +229,8 @@ impl Toolbox {
                 let runner = self.runner.as_ref().ok_or("commands are not available")?;
                 let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(120).clamp(1, 600));
                 let user = if role == AgentRole::Critic { self.command_user.as_deref() } else { None };
-                let output = runner.run(ws.root(), &args.command, timeout, user).await?;
+                let session = Session { id: &self.session, user };
+                let output = runner.run(ws.root(), &args.command, timeout, session).await?;
                 Ok(output.render(MAX_COMMAND_OUTPUT))
             }
             "submit" => {
@@ -243,10 +264,28 @@ impl Toolbox {
     }
 }
 
+/// Lines `start..=end` (1-based) of `text`, with a header saying which.
+fn line_range(text: &str, start: Option<usize>, end: Option<usize>) -> Result<String, String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    let start = start.unwrap_or(1).max(1);
+    let end = end.unwrap_or(total).min(total);
+    if start > total {
+        return Err(format!("start_line {start} is past the end: the file has {total} lines"));
+    }
+    if end < start {
+        return Err(format!("end_line {end} is before start_line {start}"));
+    }
+    Ok(format!("[lines {start}-{end} of {total}]\n{}", lines[start - 1..end].join("\n")))
+}
+
 fn spec(name: &'static str) -> ToolSpec {
     match name {
         "list_files" => ToolSpec::of::<ListArgs>(name, "List the project's files and folders, recursively."),
-        "read_file" => ToolSpec::of::<PathArgs>(name, "Read a text file from the project."),
+        "read_file" => ToolSpec::of::<ReadArgs>(
+            name,
+            "Read a text file from the project, optionally only some of its lines.",
+        ),
         "write_file" => ToolSpec::of::<WriteArgs>(
             name,
             "Create a file or replace its whole contents. Creates folders as needed.",
@@ -264,5 +303,20 @@ fn spec(name: &'static str) -> ToolSpec {
         "submit_review" => ToolSpec::of::<Review>(name, "Finish the review with your verdict."),
         "submit_plan" => ToolSpec::of::<Plan>(name, "Finish planning by submitting the task list."),
         other => unreachable!("no spec for tool {other}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::line_range;
+
+    #[test]
+    fn line_ranges_are_one_based_and_inclusive() {
+        let text = "a\nb\nc\nd";
+        assert_eq!(line_range(text, Some(2), Some(3)).unwrap(), "[lines 2-3 of 4]\nb\nc");
+        assert_eq!(line_range(text, Some(3), None).unwrap(), "[lines 3-4 of 4]\nc\nd");
+        assert_eq!(line_range(text, None, Some(99)).unwrap(), "[lines 1-4 of 4]\na\nb\nc\nd");
+        assert!(line_range(text, Some(9), None).unwrap_err().contains("4 lines"));
+        assert!(line_range(text, Some(3), Some(2)).unwrap_err().contains("before"));
     }
 }

@@ -97,6 +97,14 @@ pub enum TaskEvent {
     },
     /// Try a failed task again from the start. Only while retries remain.
     Retry,
+    /// A person gives a failed task a fresh start: back to `Pending` with
+    /// its revision and retry counters at zero.
+    ///
+    /// Only a person sends this (the orchestrator's restart action), never
+    /// the automatic routing, so the termination guarantee still holds for
+    /// everything the system does on its own: each reopen grants at most one
+    /// more [`Task::max_events`] worth of work.
+    Reopen,
 }
 
 impl TaskEvent {
@@ -110,6 +118,7 @@ impl TaskEvent {
             Self::RequestRevision { .. } => "request_revision",
             Self::Fail { .. } => "fail",
             Self::Retry => "retry",
+            Self::Reopen => "reopen",
         }
     }
 }
@@ -336,6 +345,12 @@ impl Task {
                 self.failure = Some(reason);
                 S::Failed
             }
+            (S::Failed, TaskEvent::Reopen) => {
+                self.retries = 0;
+                self.revisions = 0;
+                self.failure = None;
+                S::Pending
+            }
             (S::Failed, TaskEvent::Retry) => {
                 if !self.can_retry(limits) {
                     return Err(TransitionError::RetriesExhausted {
@@ -546,5 +561,24 @@ mod tests {
     fn states_serialize_like_the_dashboard_expects() {
         let json = serde_json::to_string(&TaskState::InProgress).unwrap();
         assert_eq!(json, "\"in_progress\"");
+    }
+
+    #[test]
+    fn reopening_gives_a_failed_task_a_fresh_start() {
+        let limits = Limits { max_retries: 0, max_revisions: 0, ..Limits::default() };
+        let mut t = task();
+        drive(
+            &mut t,
+            &limits,
+            [TaskEvent::Assign { to: AgentRole::Coder }, TaskEvent::Start, TaskEvent::Submit, revise("no")],
+        );
+        assert_eq!(t.state(), TaskState::Failed);
+        assert!(t.apply(TaskEvent::Retry, &limits, now()).is_err(), "no retries left");
+        assert_eq!(t.apply(TaskEvent::Reopen, &limits, now()).unwrap().to, TaskState::Pending);
+        assert_eq!((t.retries(), t.revisions(), t.failure()), (0, 0, None));
+        assert_eq!(t.last_feedback(), Some("no"), "the reviewer's last word is kept for the next attempt");
+
+        let mut fresh = task();
+        assert!(fresh.apply(TaskEvent::Reopen, &limits, now()).is_err(), "only failed tasks reopen");
     }
 }

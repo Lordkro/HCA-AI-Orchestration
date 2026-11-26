@@ -20,6 +20,13 @@ pub trait LlmProvider: Send + Sync + std::fmt::Debug {
 
     /// Sends one request and waits for the full response.
     fn chat<'a>(&'a self, request: &'a ChatRequest) -> BoxFuture<'a, Result<ChatResponse, LlmError>>;
+
+    /// The model's context window in tokens (input and output together), if
+    /// known. The agent loop keeps conversations within it, so a server
+    /// never has to cut the start of a prompt.
+    fn context_window(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// One turn in a conversation. The system prompt is separate, on
@@ -232,13 +239,66 @@ impl ChatResponse {
     }
 }
 
-/// A conservative token estimate: one token per character.
+/// A token estimate: one token per three bytes of UTF-8, rounded up.
 ///
-/// That is high for typical English and still covers scripts where each
-/// character is its own token, so a budget check refuses early rather than
-/// letting a call through that will exceed the budget.
+/// Tokenizers average about four characters per token for English and
+/// three for code, so this errs high for both. Scripts where each character
+/// is its own token (Chinese, Japanese) take three bytes per character in
+/// UTF-8, so they come out about right too. The old estimate, one token per
+/// character, ran three to four times high, which refused calls the budget
+/// could easily afford.
 pub fn estimate_tokens(text: &str) -> u64 {
-    u64::try_from(text.chars().count()).unwrap_or(u64::MAX)
+    u64::try_from(text.len().div_ceil(3)).unwrap_or(u64::MAX)
+}
+
+/// Tokens a provider may add per message: role markers and separators of
+/// the chat template.
+const MESSAGE_OVERHEAD: u64 = 16;
+/// Tokens a provider may add per tool when it renders the definition into
+/// the prompt.
+const TOOL_OVERHEAD: u64 = 64;
+/// Tokens a provider may add per request, such as the hidden system prompt
+/// Anthropic adds when tools are present (several hundred tokens).
+const REQUEST_OVERHEAD: u64 = 1_024;
+
+/// The most tokens `request` can cost: one token per byte of everything
+/// sent, the providers' template overhead, and the full output allowance.
+///
+/// This is a bound, not an estimate, for byte-level tokenizers (BPE as in
+/// tiktoken, or `SentencePiece` with byte fallback), which every supported
+/// provider uses: no token is shorter than a byte. Budgets reserve this
+/// before each call, so a project can't spend more than its budget. It is
+/// about three times what English text or code really costs, so near the
+/// end of a budget calls are refused while some tokens remain.
+pub fn max_request_tokens(request: &ChatRequest) -> u64 {
+    let bytes = |text: &str| u64::try_from(text.len()).unwrap_or(u64::MAX);
+    let mut total = REQUEST_OVERHEAD + request.system.as_deref().map_or(0, bytes);
+    for message in &request.messages {
+        total += MESSAGE_OVERHEAD
+            + match message {
+                Message::User { content } => bytes(content),
+                Message::ToolResult { name, content, .. } => bytes(name) + bytes(content),
+                Message::Assistant { content, tool_calls } => {
+                    bytes(content)
+                        + tool_calls
+                            .iter()
+                            .map(|call| {
+                                MESSAGE_OVERHEAD
+                                    + bytes(&call.id)
+                                    + bytes(&call.name)
+                                    + bytes(&call.arguments.to_string())
+                            })
+                            .sum::<u64>()
+                }
+            };
+    }
+    for tool in &request.tools {
+        total += TOOL_OVERHEAD
+            + bytes(&tool.name)
+            + bytes(&tool.description)
+            + bytes(&tool.parameters.to_string());
+    }
+    total.saturating_add(u64::from(request.max_tokens))
 }
 
 /// A conservative estimate of the most tokens a request can use: everything
@@ -334,7 +394,9 @@ mod tests {
     #[test]
     fn estimates_err_high() {
         assert_eq!(estimate_tokens(""), 0);
-        assert_eq!(estimate_tokens("abcd"), 4);
+        assert_eq!(estimate_tokens("abcd"), 2, "rounds up");
+        assert_eq!(estimate_tokens("abc"), 1);
+        assert_eq!(estimate_tokens("日本語"), 3, "a token per CJK character");
         let request = ChatRequest {
             model: "m".into(),
             system: Some("x".repeat(300)),
@@ -343,6 +405,9 @@ mod tests {
             max_tokens: 1000,
             temperature: None,
         };
-        assert_eq!(estimate_request_tokens(&request), 300 + 8 + 300 + 1000);
+        assert_eq!(estimate_request_tokens(&request), 100 + 8 + 100 + 1000);
+        assert_eq!(max_request_tokens(&request), 1_024 + 300 + 16 + 300 + 1000, "a token per byte");
+        let cjk = ChatRequest { system: None, messages: vec![Message::user("日本語")], ..request };
+        assert_eq!(max_request_tokens(&cjk), 1_024 + 16 + 9 + 1000, "3 bytes per character");
     }
 }

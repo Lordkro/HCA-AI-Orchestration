@@ -11,9 +11,8 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-  packages: write
+# Nothing by default; each job asks for what it needs.
+permissions: {}
 
 env:
   REGISTRY: ghcr.io
@@ -23,43 +22,64 @@ env:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Derive tag and version
         id: tag
+        # Inputs go through the environment, never into the script text, and
+        # must look like a version before anything uses them.
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
           else
-            REF="${{ github.ref_name }}"
-            echo "tag=$REF" >> "$GITHUB_OUTPUT"
-            echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
+            VERSION="${REF_NAME#v}"
           fi
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$VERSION' is not a version like 1.2.3 or 1.2.3-alpha.1"
+            exit 1
+          fi
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
   test:
     needs: prepare
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - name: Install toolchain
         run: rustup show active-toolchain || rustup toolchain install
-
+      # The same checks as CI, so a release can't skip them.
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
-        run: cargo test --locked
+        run: cargo test --all-targets --locked
+      - name: Docs
+        run: cargo doc --no-deps --locked
 
   docker:
     needs: [prepare, test]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Derive lowercased image name
         id: img
@@ -68,14 +88,14 @@ jobs:
           echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: docker/hca.Dockerfile
@@ -90,29 +110,35 @@ jobs:
   release:
     needs: [prepare, docker]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Generate release notes
         id: notes
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          TAG="${{ needs.prepare.outputs.tag }}"
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
-          cat <<EOF > /tmp/release.md
-          ## HCA Orchestration ${TAG}
-
-          See the [full changelog](https://github.com/${{ github.repository }}/compare/${PREV_TAG:+${PREV_TAG}...}${TAG}) for details.
-
-          ### What's new in this release
-
-          $(git log --oneline --no-decorate "${PREV_TAG:+${PREV_TAG}..}HEAD" 2>/dev/null | sed 's/^/- /' || echo "- Initial release")
-          EOF
-          echo "path=/tmp/release.md" >> "$GITHUB_OUTPUT"
+          NOTES="$RUNNER_TEMP/release.md"
+          {
+            echo "## HCA Orchestration ${TAG}"
+            echo
+            echo "See the [full changelog](https://github.com/${REPOSITORY}/compare/${PREV_TAG:+${PREV_TAG}...}${TAG}) for details."
+            echo
+            echo "### What's new in this release"
+            echo
+            git log --oneline --no-decorate "${PREV_TAG:+${PREV_TAG}..}HEAD" 2>/dev/null | sed 's/^/- /' || echo "- Initial release"
+          } > "$NOTES"
+          echo "path=$NOTES" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           body_path: ${{ steps.notes.outputs.path }}

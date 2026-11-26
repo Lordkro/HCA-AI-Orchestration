@@ -5,6 +5,7 @@
 //! hca serve                start the dashboard, API and workers
 //! hca token                print the dashboard link with the access token
 //! hca check                check the config, model keys and Docker
+//! hca docker-guard         run the Docker guard the sandbox talks to
 //! ```
 
 mod config;
@@ -17,6 +18,7 @@ use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
 use hca_agents::{AgentConfig, CommandRunner};
 use hca_orchestrator::{Orchestrator, OrchestratorConfig};
+use hca_sandbox::guard::{Guard, GuardConfig};
 use hca_sandbox::DockerSandbox;
 use hca_server::AppState;
 use hca_store::Store;
@@ -49,6 +51,25 @@ enum Command {
     Token,
     /// Check the configuration, API keys and Docker, then exit.
     Check,
+    /// Run the Docker guard: a proxy to the Docker socket that only lets
+    /// sandbox containers through. See `docker-compose.yml`.
+    DockerGuard {
+        /// Address to listen on. Keep it on a network only HCA can reach.
+        #[arg(long, env = "HCA_GUARD_LISTEN", default_value = "0.0.0.0:2375")]
+        listen: std::net::SocketAddr,
+        /// The Docker socket.
+        #[arg(long, env = "HCA_GUARD_SOCKET", default_value = "/var/run/docker.sock")]
+        socket: PathBuf,
+        /// The only image containers may use.
+        #[arg(long, env = "HCA_GUARD_IMAGE", default_value = "hca-sandbox:latest")]
+        image: String,
+        /// The only volume containers may mount: the workspaces volume.
+        #[arg(long, env = "HCA_GUARD_VOLUME", default_value = "hca-workspaces")]
+        volume: String,
+        /// Let containers have a network, for `[sandbox] network = true`.
+        #[arg(long, env = "HCA_GUARD_ALLOW_NETWORK")]
+        allow_network: bool,
+    },
 }
 
 #[tokio::main]
@@ -71,6 +92,17 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Check => check(&cli.config).await,
+        Command::DockerGuard { listen, socket, image, volume, allow_network } => {
+            let listener = tokio::net::TcpListener::bind(listen)
+                .await
+                .with_context(|| format!("could not listen on {listen}"))?;
+            tracing::info!(%listen, socket = %socket.display(), %image, %volume, allow_network, "Docker guard ready");
+            let guard = Guard::new(GuardConfig { image, volume, allow_network }, socket);
+            tokio::select! {
+                result = guard.serve(listener) => result.context("the Docker guard stopped"),
+                () = shutdown_signal() => Ok(()),
+            }
+        }
     }
 }
 
@@ -88,6 +120,9 @@ async fn check(path: &Path) -> anyhow::Result<()> {
     println!("config: ok ({})", path.display());
     config.llm.build().context("model configuration")?;
     println!("models: ok ({} roles configured)", config.llm.roles.len());
+    for warning in config.warnings() {
+        println!("warning: {warning}");
+    }
     if config.sandbox.enabled {
         match DockerSandbox::connect(config.sandbox.container.clone()).await {
             Ok(_) => println!("sandbox: ok (image {})", config.sandbox.container.image),
@@ -106,7 +141,8 @@ async fn serve(path: &Path) -> anyhow::Result<()> {
 
     let store = Store::open(data_dir.join("hca.db")).await.context("could not open the database")?;
     let llm = config.llm.build().context("model configuration")?;
-    let runner = sandbox(&config).await;
+    let sandbox = sandbox(&config).await;
+    let runner = sandbox.clone().map(|s| Arc::new(s) as Arc<dyn CommandRunner>);
 
     let mut orchestrator_config = OrchestratorConfig::new(data_dir.join("workspaces"));
     orchestrator_config.limits = config.limits;
@@ -114,6 +150,11 @@ async fn serve(path: &Path) -> anyhow::Result<()> {
     orchestrator_config.brief_tokens = config.orchestrator.brief_tokens;
     orchestrator_config.agent =
         AgentConfig { max_steps: config.orchestrator.max_steps, ..AgentConfig::default() };
+    orchestrator_config.run_timeout =
+        std::time::Duration::from_secs(u64::from(config.orchestrator.run_timeout_minutes) * 60);
+    for warning in config.warnings() {
+        tracing::warn!("{warning}");
+    }
     let orchestrator = Arc::new(Orchestrator::new(store.clone(), llm, runner, orchestrator_config));
     orchestrator.recover().await.context("could not recover unfinished work")?;
 
@@ -134,16 +175,57 @@ async fn serve(path: &Path) -> anyhow::Result<()> {
 
     axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()).await.context("server error")?;
 
-    tracing::info!("stopping workers; running agents finish their current step");
+    tracing::info!("stopping: running agents finish their current model call, then their jobs are requeued");
+    orchestrator.begin_shutdown();
     let _ = stop_workers.send(true);
-    for worker in workers {
-        let _ = worker.await;
+    let aborts: Vec<_> = workers.iter().map(tokio::task::JoinHandle::abort_handle).collect();
+    let all_stopped = async {
+        for worker in workers {
+            let _ = worker.await;
+        }
+    };
+    if tokio::time::timeout(SHUTDOWN_GRACE, all_stopped).await.is_err() {
+        // A model call can take minutes. Stop waiting: the call's tokens
+        // are already charged (see the orchestrator's meter), and its job
+        // goes back on the queue below.
+        tracing::warn!(
+            "an agent was still waiting on a model; stopping it, its job resumes at the next start"
+        );
+        for abort in &aborts {
+            abort.abort();
+        }
+        // Let the aborted tasks unwind, so their meters and guards run.
+        tokio::task::yield_now().await;
+    }
+    match store.requeue_interrupted(chrono::Utc::now()).await {
+        Ok(0) => {}
+        Ok(requeued) => tracing::info!(requeued, "interrupted jobs are back on the queue"),
+        Err(error) => {
+            tracing::warn!(%error, "could not requeue interrupted jobs; they resume at the next start");
+        }
+    }
+    if let Some(sandbox) = &sandbox {
+        if let Err(error) = sandbox.sweep(&workspaces_root(&config)).await {
+            tracing::warn!(%error, "could not remove sandbox containers; they are removed at the next start");
+        }
     }
     store.close().await;
     Ok(())
 }
 
-async fn sandbox(config: &Config) -> Option<Arc<dyn CommandRunner>> {
+/// How long shutdown waits for running agents before stopping them. Docker
+/// Compose gives 45 s (`stop_grace_period`) before it kills the process,
+/// which leaves time to requeue jobs and remove containers.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The workspaces folder, created if missing, as an absolute path.
+fn workspaces_root(config: &Config) -> std::path::PathBuf {
+    let workspaces = config.storage.data_dir.join("workspaces");
+    let _ = std::fs::create_dir_all(&workspaces);
+    workspaces.canonicalize().unwrap_or(workspaces)
+}
+
+async fn sandbox(config: &Config) -> Option<DockerSandbox> {
     if !config.sandbox.enabled {
         tracing::warn!("sandbox disabled: agents can't run commands or tests");
         return None;
@@ -151,7 +233,14 @@ async fn sandbox(config: &Config) -> Option<Arc<dyn CommandRunner>> {
     match DockerSandbox::connect(config.sandbox.container.clone()).await {
         Ok(sandbox) => {
             tracing::info!(image = %config.sandbox.container.image, "sandbox ready");
-            Some(Arc::new(sandbox))
+            // Containers from an earlier run hold processes nobody waits
+            // for; projects get fresh ones on their next command.
+            match sandbox.sweep(&workspaces_root(config)).await {
+                Ok(0) => {}
+                Ok(removed) => tracing::info!(removed, "removed sandbox containers left by an earlier run"),
+                Err(error) => tracing::warn!(%error, "could not clean up old sandbox containers"),
+            }
+            Some(sandbox)
         }
         Err(error) => {
             tracing::warn!(%error, "Docker unavailable: agents can't run commands or tests");
