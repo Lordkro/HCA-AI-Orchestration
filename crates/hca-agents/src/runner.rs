@@ -10,6 +10,14 @@ use std::time::Duration;
 
 use hca_llm::BoxFuture;
 
+/// `uid:gid` for the critic's commands.
+///
+/// Project files belong to the agent user, uid 1000, so this user can read
+/// them and cannot write them. It is not 1001: that is the GitHub Actions
+/// runner, and a common second account, so a critic at 1001 would own files
+/// those users create.
+pub const CRITIC_USER: &str = "10000:10000";
+
 /// What a command produced.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommandOutput {

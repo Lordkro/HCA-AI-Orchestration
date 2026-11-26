@@ -464,6 +464,10 @@ mod tests {
         let ws = dir.path().join("sandbox-test");
         std::fs::create_dir_all(&ws).unwrap();
         std::fs::write(ws.join("hello.py"), "print('hi')").unwrap();
+        // Create this before the container starts. Docker makes the tmpfs
+        // mount point as root, so the test user cannot fill it in afterwards.
+        std::fs::create_dir_all(ws.join(".git/hooks")).unwrap();
+        std::fs::write(ws.join(".git/hooks/pre-commit"), "#!/bin/sh\n").unwrap();
 
         let out = sandbox.run(&ws, "python hello.py", Duration::from_mins(1), None).await.unwrap();
         assert_eq!(out.exit_code, Some(0));
@@ -519,14 +523,12 @@ mod tests {
         assert_eq!(after.stdout.trim(), "back", "a fresh container takes over after a timeout");
 
         let critic = sandbox
-            .run(&ws, "echo pwned > hello.py", Duration::from_secs(30), Some("1001:1001"))
+            .run(&ws, "echo pwned > hello.py", Duration::from_secs(30), Some(hca_agents::CRITIC_USER))
             .await
             .unwrap();
         assert_ne!(critic.exit_code, Some(0), "the critic user cannot overwrite the project: {critic:?}");
         assert_eq!(std::fs::read_to_string(ws.join("hello.py")).unwrap(), "print('hi')");
 
-        std::fs::create_dir_all(ws.join(".git/hooks")).unwrap();
-        std::fs::write(ws.join(".git/hooks/pre-commit"), "#!/bin/sh\n").unwrap();
         let git = sandbox.run(&ws, "cat .git/hooks/pre-commit", Duration::from_secs(30), None).await.unwrap();
         assert_ne!(git.exit_code, Some(0), "the host .git directory is covered by tmpfs: {git:?}");
 

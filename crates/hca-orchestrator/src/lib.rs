@@ -24,6 +24,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use hca_agents::{
     Agent, AgentConfig, AgentError, AgentRun, CommandRunner, Submission, Toolbox, Verdict, Workspace,
+    CRITIC_USER,
 };
 use hca_core::{
     assess, ready_tasks, AgentRole, FailureReason, Limits, Project, ProjectEvent, ProjectFailure, ProjectId,
@@ -1023,7 +1024,7 @@ impl Orchestrator {
     ) -> Result<RunOutcome, JobError> {
         let mut toolbox = Toolbox::new(workspace, self.runner.clone(), self.config.limits);
         if role == AgentRole::Critic {
-            toolbox = toolbox.with_command_user("1001:1001");
+            toolbox = toolbox.with_command_user(CRITIC_USER);
         }
         let agent = Agent::new(&self.llm, &toolbox, self.config.agent);
         let mut tokens = 0u64;
