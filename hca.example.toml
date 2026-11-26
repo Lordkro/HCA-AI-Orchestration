@@ -1,0 +1,87 @@
+# HCA configuration.
+#
+# API keys never go in this file. Each cloud provider reads its key from an
+# environment variable (shown below), so this file is safe to commit.
+
+[server]
+# 127.0.0.1 keeps the dashboard on this machine. Use 0.0.0.0 only behind a
+# firewall or reverse proxy; the access token is required either way.
+bind = "127.0.0.1:8080"
+
+[storage]
+# Database, access token and project workspaces.
+data_dir = "data"
+
+[limits]
+max_revisions = 5             # review rounds per attempt at a task
+max_retries = 1               # retries of a failed task
+max_tasks = 50                # tasks per project
+max_parallel_tasks = 3        # tasks running at once per project
+project_token_budget = 500000 # tokens per project, all calls included
+task_timeout_minutes = 30
+
+[orchestrator]
+workers = 2       # jobs processed at once, across projects
+max_steps = 40    # model calls per agent run
+brief_tokens = 8000
+
+[sandbox]
+# Agents run commands (tests, scripts) only inside these containers.
+# Build the image once: docker build -t hca-sandbox -f docker/sandbox.Dockerfile docker
+enabled = true
+image = "hca-sandbox:latest"
+memory_mb = 2048
+cpus = 2.0
+pids_limit = 256
+network = false   # no network inside sandboxes
+user = "1000:1000"
+
+# ---------------------------------------------------------------------------
+# Models. Define providers, then pick a provider and model for each role.
+# Only providers that a role uses need an API key.
+# ---------------------------------------------------------------------------
+
+[llm]
+timeout_secs = 600
+
+[llm.providers.local]
+kind = "ollama"
+base_url = "http://localhost:11434"
+num_ctx = 16384
+
+[llm.providers.claude]
+kind = "anthropic"            # key from ANTHROPIC_API_KEY
+
+[llm.providers.grok]
+kind = "grok"                 # key from XAI_API_KEY
+
+[llm.providers.openai]
+kind = "openai"               # key from OPENAI_API_KEY
+
+# Everything local by default. To use a cloud model for a role, change its
+# provider and model, for example:
+#   [llm.roles.coder]
+#   provider = "grok"
+#   model = "grok-4"
+
+[llm.roles.pm]
+provider = "local"
+model = "qwen3:8b"
+
+[llm.roles.research]
+provider = "local"
+model = "qwen3:8b"
+
+[llm.roles.spec]
+provider = "local"
+model = "qwen3:8b"
+
+[llm.roles.coder]
+provider = "local"
+model = "qwen2.5-coder:7b"
+max_tokens = 8192
+
+[llm.roles.critic]
+provider = "local"
+model = "qwen3:8b"
+temperature = 0.0

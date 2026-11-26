@@ -1,0 +1,22 @@
+[package]
+name = "hca-llm"
+description = "Model providers for HCA: Ollama, Anthropic, OpenAI-compatible and Grok, plus a budget gate and context builder."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hca-core.workspace = true
+reqwest.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true
+
+[lints]
+workspace = true

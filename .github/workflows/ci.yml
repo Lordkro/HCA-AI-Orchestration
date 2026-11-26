@@ -3,83 +3,53 @@ name: CI
 on:
   push:
     branches: ["main"]
-    tags: ["v*"]
+    paths: ["crates/**", "docker/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", "hca.example.toml", "docker-compose.yml", ".github/workflows/ci.yml"]
   pull_request:
-    branches: ["main"]
+    paths: ["crates/**", "docker/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml", "clippy.toml", "hca.example.toml", "docker-compose.yml", ".github/workflows/ci.yml"]
 
 permissions:
   contents: read
-  packages: write
 
 env:
-  REGISTRY: ghcr.io
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
 
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12"]
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
         with:
-          version: "latest"
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install dependencies
-        run: uv pip install --system ".[dev]"
-
-      - name: Lint with ruff
-        run: ruff check src/ tests/
-
-      - name: Type-check with mypy
-        run: mypy src/ --ignore-missing-imports
-
-      - name: Test with pytest
-        run: python -m pytest tests/ -v --tb=short --cov=src/hca
+          persist-credentials: false
+      # rust-toolchain.toml pins the channel and components; rustup installs them.
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --all-targets --locked
+      - name: Docs
+        run: cargo doc --no-deps --locked
 
   docker:
-    needs: test
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Derive lowercased image name
-        id: img
+        with:
+          persist-credentials: false
+      - name: Build the sandbox image
+        run: docker build -t hca-sandbox -f docker/sandbox.Dockerfile docker
+      - name: Test the sandbox against real Docker
         run: |
-          echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=ref,event=branch
-            type=sha,format=short
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          rustup show active-toolchain || rustup toolchain install
+          cargo test --locked -p hca-sandbox -- --ignored
+      - name: Build the HCA image
+        run: docker build -t hca -f docker/hca.Dockerfile .
+      - name: Check the image starts
+        run: docker run --rm hca --version
+      - name: Validate the Compose file
+        run: |
+          cp hca.example.toml hca.toml
+          docker compose config --quiet

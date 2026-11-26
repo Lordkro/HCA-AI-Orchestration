@@ -1,0 +1,25 @@
+[package]
+name = "hca-orchestrator"
+description = "The HCA orchestrator: plans, dispatches, reviews and finishes projects."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono.workspace = true
+hca-agents.workspace = true
+hca-core.workspace = true
+hca-llm.workspace = true
+hca-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

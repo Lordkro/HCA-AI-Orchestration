@@ -1,0 +1,23 @@
+[package]
+name = "hca-agents"
+description = "The HCA agent loop, workspace tools and role prompts."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono.workspace = true
+hca-core.workspace = true
+hca-llm.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
