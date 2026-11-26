@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use bollard::container::LogOutput;
@@ -90,7 +91,24 @@ pub const CONTAINER_WORKSPACE: &str = "/workspace";
 /// Label put on every sandbox container, so they can be found and cleaned up.
 pub const LABEL: &str = "hca.sandbox";
 
+/// Label holding the settings a container was created with.
+///
+/// A running container is reused only when this matches. Anything else is
+/// removed and created again, so turning the network off actually applies.
+const CONFIG_LABEL: &str = "hca.config";
+
 impl SandboxConfig {
+    /// Settings that decide whether an existing container can be reused.
+    ///
+    /// Includes a marker that `/workspace/.git` is covered by a tmpfs, so
+    /// containers created before that mount are replaced.
+    fn fingerprint(&self) -> String {
+        format!(
+            "image={};memory={};cpus={};pids={};network={};user={};tmp={};git-tmpfs=1",
+            self.image, self.memory_mb, self.cpus, self.pids_limit, self.network, self.user, self.tmp_mb
+        )
+    }
+
     /// The Docker path of `workspace`, after [`path_map`](Self::path_map).
     pub fn host_path(&self, workspace: &Path) -> PathBuf {
         match &self.path_map {
@@ -117,6 +135,7 @@ impl SandboxConfig {
             network_disabled: Some(!self.network),
             labels: Some(HashMap::from([
                 (LABEL.to_owned(), "1".to_owned()),
+                (CONFIG_LABEL.to_owned(), self.fingerprint()),
                 ("hca.workspace".to_owned(), workspace.display().to_string()),
             ])),
             host_config: Some(HostConfig {
@@ -129,10 +148,12 @@ impl SandboxConfig {
                 cap_drop: Some(vec!["ALL".into()]),
                 security_opt: Some(vec!["no-new-privileges".into()]),
                 readonly_rootfs: Some(true),
-                tmpfs: Some(HashMap::from([(
-                    "/tmp".to_owned(),
-                    format!("rw,nosuid,nodev,size={}m", self.tmp_mb),
-                )])),
+                tmpfs: Some(HashMap::from([
+                    ("/tmp".to_owned(), format!("rw,nosuid,nodev,size={}m", self.tmp_mb)),
+                    // Hides the host's `.git` (hooks, config, credentials)
+                    // from every command, including ones the coder runs.
+                    ("/workspace/.git".to_owned(), "rw,nosuid,nodev,size=1m".to_owned()),
+                ])),
                 init: Some(true),
                 ..HostConfig::default()
             }),
@@ -170,6 +191,8 @@ pub enum SandboxError {
 pub struct DockerSandbox {
     docker: Docker,
     config: SandboxConfig,
+    /// One lock per container, so a timeout can't kill a sibling exec.
+    locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl DockerSandbox {
@@ -182,7 +205,12 @@ impl DockerSandbox {
     pub async fn connect(config: SandboxConfig) -> Result<Self, SandboxError> {
         let docker = Docker::connect_with_defaults().map_err(|e| SandboxError::Unavailable(e.to_string()))?;
         docker.ping().await.map_err(|e| SandboxError::Unavailable(e.to_string()))?;
-        Ok(Self { docker, config })
+        Ok(Self { docker, config, locks: Arc::new(Mutex::new(HashMap::new())) })
+    }
+
+    fn lock_for(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.locks.lock().unwrap_or_else(PoisonError::into_inner);
+        locks.entry(name.to_owned()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
     }
 
     /// The settings in use.
@@ -196,37 +224,51 @@ impl DockerSandbox {
     ///
     /// Returns the Docker error, except "no such container".
     pub async fn remove(&self, workspace: &Path) -> Result<(), SandboxError> {
+        self.remove_named(&container_name(workspace)).await
+    }
+
+    async fn remove_named(&self, name: &str) -> Result<(), SandboxError> {
         let options = RemoveContainerOptionsBuilder::new().force(true).build();
-        match self.docker.remove_container(&container_name(workspace), Some(options)).await {
+        match self.docker.remove_container(name, Some(options)).await {
             Err(e) if status(&e) == Some(404) => Ok(()),
             other => Ok(other?),
         }
     }
 
     async fn ensure_running(&self, name: &str, workspace: &Path) -> Result<(), SandboxError> {
-        let running = match self
+        let want = self.config.fingerprint();
+        let info = match self
             .docker
             .inspect_container(name, None::<bollard::query_parameters::InspectContainerOptions>)
             .await
         {
-            Ok(info) => Some(info.state.and_then(|s| s.running).unwrap_or(false)),
+            Ok(info) => Some(info),
             Err(e) if status(&e) == Some(404) => None,
             Err(e) => return Err(e.into()),
         };
-        match running {
-            Some(true) => return Ok(()),
-            None => {
-                let options = CreateContainerOptionsBuilder::new().name(name).build();
-                match self.docker.create_container(Some(options), self.config.container_body(workspace)).await
-                {
-                    // Another run created it at the same moment.
-                    Err(e) if status(&e) == Some(409) => {}
-                    other => {
-                        other?;
-                    }
-                }
+        let reusable = info.as_ref().is_some_and(|info| {
+            let running = info.state.as_ref().and_then(|state| state.running).unwrap_or(false);
+            let have = info
+                .config
+                .as_ref()
+                .and_then(|config| config.labels.as_ref())
+                .and_then(|labels| labels.get(CONFIG_LABEL))
+                .map(String::as_str);
+            running && have == Some(want.as_str())
+        });
+        if reusable {
+            return Ok(());
+        }
+        if info.is_some() {
+            self.remove_named(name).await?;
+        }
+        let options = CreateContainerOptionsBuilder::new().name(name).build();
+        match self.docker.create_container(Some(options), self.config.container_body(workspace)).await {
+            // Another run created it at the same moment.
+            Err(e) if status(&e) == Some(409) => {}
+            other => {
+                other?;
             }
-            Some(false) => {}
         }
         match self.docker.start_container(name, None::<StartContainerOptions>).await {
             Err(e) if status(&e) == Some(304) => Ok(()),
@@ -239,8 +281,11 @@ impl DockerSandbox {
         workspace: &Path,
         command: &str,
         timeout: Duration,
+        user: Option<&str>,
     ) -> Result<CommandOutput, SandboxError> {
         let name = container_name(workspace);
+        let lock = self.lock_for(&name);
+        let _guard = lock.lock().await;
         self.ensure_running(&name, workspace).await?;
 
         let exec = self
@@ -252,6 +297,7 @@ impl DockerSandbox {
                     attach_stdout: Some(true),
                     attach_stderr: Some(true),
                     working_dir: Some(CONTAINER_WORKSPACE),
+                    user,
                     ..CreateExecOptions::default()
                 },
             )
@@ -279,13 +325,22 @@ impl DockerSandbox {
             Ok(())
         };
 
+        let mut failure_note = String::new();
         let timed_out = if let Ok(result) = tokio::time::timeout(timeout, collect).await {
             result?;
             false
         } else {
-            // Docker can't kill a single exec, so stop the whole container;
-            // the next command gets a fresh one.
-            let _ = self.docker.kill_container(&name, None::<KillContainerOptions>).await;
+            // Docker can't kill a single exec, so destroy the container.
+            // The per-workspace lock means this doesn't hit a sibling exec,
+            // and the next command creates a new container.
+            let mut notes = Vec::new();
+            if let Err(error) = self.docker.kill_container(&name, None::<KillContainerOptions>).await {
+                notes.push(format!("kill failed: {error}"));
+            }
+            if let Err(error) = self.remove_named(&name).await {
+                notes.push(format!("remove failed: {error}"));
+            }
+            failure_note = notes.join("\n");
             true
         };
 
@@ -294,10 +349,17 @@ impl DockerSandbox {
         } else {
             self.docker.inspect_exec(&exec.id).await?.exit_code.and_then(|c| i32::try_from(c).ok())
         };
+        let mut stderr = String::from_utf8_lossy(&stderr).into_owned();
+        if !failure_note.is_empty() {
+            if !stderr.is_empty() && !stderr.ends_with('\n') {
+                stderr.push('\n');
+            }
+            stderr.push_str(&failure_note);
+        }
         Ok(CommandOutput {
             exit_code,
             stdout: String::from_utf8_lossy(&stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            stderr,
             timed_out,
         })
     }
@@ -309,8 +371,9 @@ impl CommandRunner for DockerSandbox {
         workspace: &'a Path,
         command: &'a str,
         timeout: Duration,
+        user: Option<&'a str>,
     ) -> BoxFuture<'a, Result<CommandOutput, String>> {
-        Box::pin(async move { self.exec(workspace, command, timeout).await.map_err(|e| e.to_string()) })
+        Box::pin(async move { self.exec(workspace, command, timeout, user).await.map_err(|e| e.to_string()) })
     }
 }
 
@@ -345,7 +408,10 @@ mod tests {
         assert_eq!(host.readonly_rootfs, Some(true));
         assert_eq!(host.binds, Some(vec!["/data/ws/1234:/workspace:rw".to_string()]));
         assert_eq!(body.user.as_deref(), Some("1000:1000"));
-        assert!(host.tmpfs.unwrap()["/tmp"].contains("size=512m"));
+        let tmpfs = host.tmpfs.unwrap();
+        assert!(tmpfs["/tmp"].contains("size=512m"));
+        assert!(tmpfs["/workspace/.git"].contains("size=1m"), "host .git is hidden");
+        assert!(body.labels.unwrap()[CONFIG_LABEL].contains("git-tmpfs=1"));
     }
 
     #[test]
@@ -399,19 +465,20 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         std::fs::write(ws.join("hello.py"), "print('hi')").unwrap();
 
-        let out = sandbox.run(&ws, "python hello.py", Duration::from_mins(1)).await.unwrap();
+        let out = sandbox.run(&ws, "python hello.py", Duration::from_mins(1), None).await.unwrap();
         assert_eq!(out.exit_code, Some(0));
         assert_eq!(out.stdout.trim(), "hi");
 
         let net = sandbox
-            .run(&ws, "python -c \"import urllib.request; urllib.request.urlopen('http://example.com', timeout=3)\"", Duration::from_secs(30))
+            .run(&ws, "python -c \"import urllib.request; urllib.request.urlopen('http://example.com', timeout=3)\"", Duration::from_secs(30), None)
             .await
             .unwrap();
         assert_ne!(net.exit_code, Some(0), "no network by default");
 
-        let root = sandbox.run(&ws, "echo x > /evil", Duration::from_secs(30)).await.unwrap();
+        let root = sandbox.run(&ws, "echo x > /evil", Duration::from_secs(30), None).await.unwrap();
         assert_ne!(root.exit_code, Some(0), "the root filesystem is read-only");
-        let tmp = sandbox.run(&ws, "echo x > /tmp/ok && cat /tmp/ok", Duration::from_secs(30)).await.unwrap();
+        let tmp =
+            sandbox.run(&ws, "echo x > /tmp/ok && cat /tmp/ok", Duration::from_secs(30), None).await.unwrap();
         assert_eq!(tmp.stdout.trim(), "x", "/tmp is writable");
 
         // Kills and reaps its children before exiting, so the later checks
@@ -426,13 +493,18 @@ mod tests {
              for pid in kids:\n    os.waitpid(pid, 0)\n",
         )
         .unwrap();
-        let forks = sandbox.run(&ws, "python forks.py", Duration::from_mins(1)).await.unwrap();
+        let forks = sandbox.run(&ws, "python forks.py", Duration::from_mins(1), None).await.unwrap();
         assert!(forks.stdout.contains("limited at"), "the process limit applies: {forks:?}");
-        let ok = sandbox.run(&ws, "echo still-forking", Duration::from_secs(30)).await.unwrap();
+        let ok = sandbox.run(&ws, "echo still-forking", Duration::from_secs(30), None).await.unwrap();
         assert_eq!(ok.stdout.trim(), "still-forking", "processes are free again: {ok:?}");
 
         let memory = sandbox
-            .run(&ws, "python -c \"b = bytearray(3 * 1024**3); print('allocated')\"", Duration::from_mins(1))
+            .run(
+                &ws,
+                "python -c \"b = bytearray(3 * 1024**3); print('allocated')\"",
+                Duration::from_mins(1),
+                None,
+            )
             .await
             .unwrap();
         assert!(!memory.stdout.contains("allocated"), "3 GiB doesn't fit in the 2 GiB limit: {memory:?}");
@@ -441,10 +513,22 @@ mod tests {
             "the allocation failed for lack of memory: {memory:?}"
         );
 
-        let slow = sandbox.run(&ws, "sleep 30", Duration::from_secs(2)).await.unwrap();
+        let slow = sandbox.run(&ws, "sleep 30", Duration::from_secs(2), None).await.unwrap();
         assert!(slow.timed_out, "the command was stopped at the timeout: {slow:?}");
-        let after = sandbox.run(&ws, "echo back", Duration::from_secs(30)).await.unwrap();
+        let after = sandbox.run(&ws, "echo back", Duration::from_secs(30), None).await.unwrap();
         assert_eq!(after.stdout.trim(), "back", "a fresh container takes over after a timeout");
+
+        let critic = sandbox
+            .run(&ws, "echo pwned > hello.py", Duration::from_secs(30), Some("1001:1001"))
+            .await
+            .unwrap();
+        assert_ne!(critic.exit_code, Some(0), "the critic user cannot overwrite the project: {critic:?}");
+        assert_eq!(std::fs::read_to_string(ws.join("hello.py")).unwrap(), "print('hi')");
+
+        std::fs::create_dir_all(ws.join(".git/hooks")).unwrap();
+        std::fs::write(ws.join(".git/hooks/pre-commit"), "#!/bin/sh\n").unwrap();
+        let git = sandbox.run(&ws, "cat .git/hooks/pre-commit", Duration::from_secs(30), None).await.unwrap();
+        assert_ne!(git.exit_code, Some(0), "the host .git directory is covered by tmpfs: {git:?}");
 
         sandbox.remove(&ws).await.unwrap();
     }

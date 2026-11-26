@@ -146,7 +146,8 @@ impl Store {
     ///
     /// Runnable means: the project is active, and the job is queued and due,
     /// or running with an expired lease. A job whose lease expired on its
-    /// last attempt is marked dead instead of claimed.
+    /// last attempt is marked dead and returned, so the caller can fail the
+    /// work it was doing. Its status is [`JobStatus::Dead`].
     ///
     /// # Errors
     ///
@@ -172,35 +173,21 @@ impl Store {
         );
 
         let mut tx = self.writer.begin().await?;
-        loop {
-            let mut query = sqlx::query_as::<_, (i64, i64, i64)>(&select).bind(&now_text).bind(&now_text);
-            for kind in kinds {
-                query = query.bind(*kind);
-            }
-            let Some((id, attempts, max_attempts)) = query.fetch_optional(&mut *tx).await? else {
-                tx.commit().await?;
-                return Ok(None);
-            };
+        let mut query = sqlx::query_as::<_, (i64, i64, i64)>(&select).bind(&now_text).bind(&now_text);
+        for kind in kinds {
+            query = query.bind(*kind);
+        }
+        let Some((id, attempts, max_attempts)) = query.fetch_optional(&mut *tx).await? else {
+            tx.commit().await?;
+            return Ok(None);
+        };
 
-            if attempts >= max_attempts {
-                sqlx::query(
-                    "UPDATE jobs SET status = 'dead', locked_by = NULL, locked_until = NULL, \
-                     last_error = COALESCE(last_error, 'lease expired on the last attempt'), updated_at = ? \
-                     WHERE id = ?",
-                )
-                .bind(&now_text)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
-                continue;
-            }
-
+        if attempts >= max_attempts {
             let row = sqlx::query(&format!(
-                "UPDATE jobs SET status = 'running', attempts = attempts + 1, locked_by = ?, \
-                 locked_until = ?, updated_at = ? WHERE id = ? RETURNING {JOB_COLUMNS}"
+                "UPDATE jobs SET status = 'dead', locked_by = NULL, locked_until = NULL, \
+                 last_error = COALESCE(last_error, 'lease expired on the last attempt'), updated_at = ? \
+                 WHERE id = ? RETURNING {JOB_COLUMNS}"
             ))
-            .bind(worker)
-            .bind(time::encode(now + lease))
             .bind(&now_text)
             .bind(id)
             .fetch_one(&mut *tx)
@@ -209,6 +196,20 @@ impl Store {
             tx.commit().await?;
             return Ok(Some(job));
         }
+
+        let row = sqlx::query(&format!(
+            "UPDATE jobs SET status = 'running', attempts = attempts + 1, locked_by = ?, \
+             locked_until = ?, updated_at = ? WHERE id = ? RETURNING {JOB_COLUMNS}"
+        ))
+        .bind(worker)
+        .bind(time::encode(now + lease))
+        .bind(&now_text)
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let job = job_from_row(&row)?;
+        tx.commit().await?;
+        Ok(Some(job))
     }
 
     /// Extends the lease on a job the worker holds.
@@ -232,6 +233,32 @@ impl Store {
         .bind(id.0)
         .bind(worker)
         .bind(time::encode(now))
+        .execute(&self.writer)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::LeaseLost(id));
+        }
+        Ok(())
+    }
+
+    /// Puts a job this worker still holds back on the queue.
+    ///
+    /// Attempts already counted stay counted, and the job may run again
+    /// immediately. Used when a project is paused in the middle of a job:
+    /// the work is not finished and must not be marked done.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::LeaseLost`] if this worker no longer holds it.
+    pub async fn release(&self, id: JobId, worker: &str, now: DateTime<Utc>) -> Result<()> {
+        let result = sqlx::query(
+            "UPDATE jobs SET status = 'queued', locked_by = NULL, locked_until = NULL, \
+             run_after = ?, updated_at = ? WHERE id = ? AND status = 'running' AND locked_by = ?",
+        )
+        .bind(time::encode(now))
+        .bind(time::encode(now))
+        .bind(id.0)
+        .bind(worker)
         .execute(&self.writer)
         .await?;
         if result.rows_affected() == 0 {

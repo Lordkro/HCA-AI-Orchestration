@@ -286,10 +286,13 @@ async fn a_lease_expiring_on_the_last_attempt_kills_the_job() {
     store.claim("crashed", &[], Duration::minutes(5), t0()).await.unwrap().unwrap();
 
     let later = t0() + Duration::minutes(10);
-    assert_eq!(store.claim("other", &[], Duration::minutes(5), later).await.unwrap(), None);
-    let job = store.job(id).await.unwrap();
+    let job = store.claim("other", &[], Duration::minutes(5), later).await.unwrap().unwrap();
+    assert_eq!(job.id, id);
     assert_eq!(job.status, JobStatus::Dead);
     assert_eq!(job.last_error.as_deref(), Some("lease expired on the last attempt"));
+    let stored = store.job(id).await.unwrap();
+    assert_eq!(stored.status, JobStatus::Dead);
+    assert_eq!(stored.last_error.as_deref(), Some("lease expired on the last attempt"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

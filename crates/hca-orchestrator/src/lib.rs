@@ -132,6 +132,8 @@ pub struct TokenUsage {
 enum JobError {
     Retry(String),
     LeaseLost,
+    /// The project was paused. The job goes back on the queue.
+    Paused,
     Store(StoreError),
 }
 
@@ -428,16 +430,31 @@ impl Orchestrator {
     ///
     /// Returns a store error if the job couldn't be claimed or settled.
     pub async fn step(&self, worker: &str) -> Result<bool, OrchestratorError> {
+        self.enforce_timeouts(Utc::now()).await?;
         let now = Utc::now();
         let Some(job) = self.store.claim(worker, &[], self.config.lease, now).await? else {
             return Ok(false);
         };
+        if job.status == JobStatus::Dead {
+            let message =
+                job.last_error.clone().unwrap_or_else(|| "lease expired on the last attempt".into());
+            tracing::warn!(job = %job.id, %message, "job died when its last lease expired");
+            self.job_dead(&job, &message).await?;
+            return Ok(true);
+        }
         tracing::info!(job = %job.id, kind = %job.kind, project = %job.project_id, "job claimed");
         match self.with_lease(&job, worker).await {
             Ok(()) => match self.store.complete(job.id, worker, Utc::now()).await {
                 Ok(()) | Err(StoreError::LeaseLost(_)) => {}
                 Err(other) => return Err(other.into()),
             },
+            Err(JobError::Paused) => {
+                tracing::info!(job = %job.id, "job returned to the queue: project paused");
+                match self.store.release(job.id, worker, Utc::now()).await {
+                    Ok(()) | Err(StoreError::LeaseLost(_)) => {}
+                    Err(other) => return Err(other.into()),
+                }
+            }
             Err(JobError::LeaseLost) => {
                 tracing::info!(job = %job.id, "job dropped: lease lost or project finished");
             }
@@ -514,7 +531,61 @@ impl Orchestrator {
             }
             self.advance(project.id).await?;
         }
+        self.enforce_timeouts(Utc::now()).await?;
         Ok(())
+    }
+
+    /// Fails in-flight tasks that have no queued or running job and have sat
+    /// longer than [`Limits::task_timeout_minutes`](hca_core::Limits::task_timeout_minutes).
+    ///
+    /// A task with a live job is left alone: the lease covers a worker that
+    /// is still going. `now` is injected so a caller can move the clock
+    /// without sleeping for the timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store error.
+    pub async fn enforce_timeouts(&self, now: DateTime<Utc>) -> Result<(), OrchestratorError> {
+        use std::collections::HashSet;
+        for project in self.store.projects(Some(ProjectStatus::Active)).await? {
+            let live: HashSet<TaskId> = self
+                .store
+                .jobs(project.id, None)
+                .await?
+                .into_iter()
+                .filter(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
+                .filter_map(|job| job.task_id)
+                .collect();
+            let mut timed_out = false;
+            for task in self.store.tasks(project.id).await? {
+                if live.contains(&task.id) || !task.is_timed_out(&self.config.limits, now) {
+                    continue;
+                }
+                let event = TaskEvent::Fail { reason: FailureReason::Timeout };
+                if let Ok(transition) =
+                    self.store.apply_task_event(task.id, event, &self.config.limits, now).await
+                {
+                    timed_out = true;
+                    let task = self.store.task(task.id).await?;
+                    self.emit_task(&task, transition);
+                    let note = format!("'{}' timed out with no job running it", task.title);
+                    self.log(project.id, Some(task.id), "system", "pm", "status_update", &note).await;
+                }
+            }
+            if timed_out {
+                self.advance(project.id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Paused work goes back on the queue. Finished projects drop it.
+    fn stop_unless_active(project: &Project) -> Result<(), JobError> {
+        if project.status() == ProjectStatus::Paused {
+            Err(JobError::Paused)
+        } else {
+            Ok(())
+        }
     }
 
     async fn with_lease(&self, job: &Job, worker: &str) -> Result<(), JobError> {
@@ -592,7 +663,7 @@ impl Orchestrator {
     async fn plan(&self, project_id: ProjectId) -> Result<(), JobError> {
         let project = self.store.project(project_id).await?;
         if !project.accepts_work() {
-            return Ok(());
+            return Self::stop_unless_active(&project);
         }
         if !self.store.tasks(project_id).await?.is_empty() {
             self.advance(project_id).await.map_err(|e| JobError::Retry(e.to_string()))?;
@@ -607,10 +678,12 @@ impl Orchestrator {
             .build()
             .text;
 
-        let outcome =
-            self.run_agent(AgentRole::Pm, &project, "Planning the project".into(), workspace, brief).await?;
-        if !self.store.project(project_id).await?.accepts_work() {
-            return Ok(());
+        let outcome = self
+            .run_agent(AgentRole::Pm, &project, None, "Planning the project".into(), workspace, brief)
+            .await?;
+        let project = self.store.project(project_id).await?;
+        if !project.accepts_work() {
+            return Self::stop_unless_active(&project);
         }
         let now = Utc::now();
         let failure = match outcome {
@@ -650,17 +723,23 @@ impl Orchestrator {
             RunOutcome::Failed(_, message) => message,
         };
         let reason = ProjectFailure::InvalidPlan(failure.clone());
-        if self.store.apply_project_event(project_id, ProjectEvent::Fail { reason }, now).await.is_ok() {
-            self.after_project_change(project_id, &format!("Planning failed: {failure}")).await;
+        match self.store.apply_project_event(project_id, ProjectEvent::Fail { reason }, now).await {
+            Ok(_) => {
+                self.after_project_change(project_id, &format!("Planning failed: {failure}")).await;
+                Ok(())
+            }
+            // The project already finished, so this failure can't be
+            // recorded. Completing the job is the right end for it.
+            Err(StoreError::Project(_) | StoreError::ProjectNotActive(_)) => Ok(()),
+            Err(other) => Err(other.into()),
         }
-        Ok(())
     }
 
     async fn work(&self, task_id: TaskId) -> Result<(), JobError> {
         let task = self.store.task(task_id).await?;
         let project = self.store.project(task.project_id).await?;
         if !project.accepts_work() {
-            return Ok(());
+            return Self::stop_unless_active(&project);
         }
         match task.state() {
             TaskState::Assigned | TaskState::Revision => {
@@ -670,6 +749,7 @@ impl Orchestrator {
                     .await
                 {
                     Ok(transition) => self.emit_task(&task, transition),
+                    Err(StoreError::ProjectNotActive(ProjectStatus::Paused)) => return Err(JobError::Paused),
                     Err(StoreError::Task(_) | StoreError::ProjectNotActive(_)) => return Ok(()),
                     Err(other) => return Err(other.into()),
                 }
@@ -682,10 +762,19 @@ impl Orchestrator {
         let workspace = self.workspace(project.id)?;
         let brief = self.work_brief(&project, &task, &workspace).await?;
 
-        let outcome =
-            self.run_agent(role, &project, format!("Working on '{}'", task.title), workspace, brief).await?;
-        if !self.store.project(project.id).await?.accepts_work() {
-            return Ok(());
+        let outcome = self
+            .run_agent(
+                role,
+                &project,
+                Some(task_id),
+                format!("Working on '{}'", task.title),
+                workspace,
+                brief,
+            )
+            .await?;
+        let project_now = self.store.project(project.id).await?;
+        if !project_now.accepts_work() {
+            return Self::stop_unless_active(&project_now);
         }
         let now = Utc::now();
         match outcome {
@@ -736,7 +825,10 @@ impl Orchestrator {
     async fn review(&self, task_id: TaskId, payload: &Value) -> Result<(), JobError> {
         let task = self.store.task(task_id).await?;
         let project = self.store.project(task.project_id).await?;
-        if !project.accepts_work() || task.state() != TaskState::Review {
+        if !project.accepts_work() {
+            return Self::stop_unless_active(&project);
+        }
+        if task.state() != TaskState::Review {
             return Ok(());
         }
         let summary = payload.get("summary").and_then(Value::as_str).unwrap_or("(no summary)");
@@ -751,9 +843,11 @@ impl Orchestrator {
         let brief = self.review_brief(&task, summary, &files);
         let workspace = self.workspace(project.id)?;
         let label = format!("Reviewing '{}'", task.title);
-        let outcome = self.run_agent(AgentRole::Critic, &project, label, workspace, brief).await?;
-        if !self.store.project(project.id).await?.accepts_work() {
-            return Ok(());
+        let outcome =
+            self.run_agent(AgentRole::Critic, &project, Some(task_id), label, workspace, brief).await?;
+        let project_now = self.store.project(project.id).await?;
+        if !project_now.accepts_work() {
+            return Self::stop_unless_active(&project_now);
         }
         let now = Utc::now();
         let owner = role_name(&task);
@@ -922,11 +1016,15 @@ impl Orchestrator {
         &self,
         role: AgentRole,
         project: &Project,
+        task_id: Option<TaskId>,
         label: String,
         workspace: Workspace,
         brief: String,
     ) -> Result<RunOutcome, JobError> {
-        let toolbox = Toolbox::new(workspace, self.runner.clone(), self.config.limits);
+        let mut toolbox = Toolbox::new(workspace, self.runner.clone(), self.config.limits);
+        if role == AgentRole::Critic {
+            toolbox = toolbox.with_command_user("1001:1001");
+        }
         let agent = Agent::new(&self.llm, &toolbox, self.config.agent);
         let mut tokens = 0u64;
         let mut calls = 0u64;
@@ -940,6 +1038,9 @@ impl Orchestrator {
         self.board.lock().unwrap_or_else(PoisonError::into_inner).finish(role, run_id, calls, tokens);
 
         if tokens > 0 {
+            if let Some(task_id) = task_id {
+                self.store.add_task_tokens(task_id, tokens).await?;
+            }
             let within =
                 self.store.charge_tokens(project.id, tokens, &self.config.limits, Utc::now()).await?;
             if !within {

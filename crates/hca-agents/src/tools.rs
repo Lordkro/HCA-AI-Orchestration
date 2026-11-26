@@ -87,13 +87,26 @@ pub struct Toolbox {
     workspace: Workspace,
     runner: Option<Arc<dyn CommandRunner>>,
     limits: Limits,
+    /// `uid:gid` passed to `run_command` for the critic only.
+    command_user: Option<String>,
 }
 
 impl Toolbox {
     /// Tools working in `workspace`. Without a `runner`, no role gets
     /// `run_command`.
     pub fn new(workspace: Workspace, runner: Option<Arc<dyn CommandRunner>>, limits: Limits) -> Self {
-        Self { workspace, runner, limits }
+        Self { workspace, runner, limits, command_user: None }
+    }
+
+    /// Runs the critic's commands as `user` (`uid:gid`).
+    ///
+    /// Other roles keep the sandbox's default user, which owns the project
+    /// files. The critic's user should be able to read those files and write
+    /// `/tmp`, and nothing else.
+    #[must_use]
+    pub fn with_command_user(mut self, user: impl Into<String>) -> Self {
+        self.command_user = Some(user.into());
+        self
     }
 
     /// The workspace the tools act on.
@@ -146,7 +159,7 @@ impl Toolbox {
         let mut outcome =
             ToolOutcome { message: Message::tool_result(call, ""), submission: None, wrote: None };
         let result = if self.names(role).contains(&call.name.as_str()) {
-            self.dispatch(call, &mut outcome).await
+            self.dispatch(role, call, &mut outcome).await
         } else {
             Err(format!("the {} role has no tool named {:?}", role, call.name))
         };
@@ -161,7 +174,12 @@ impl Toolbox {
         outcome
     }
 
-    async fn dispatch(&self, call: &ToolCall, outcome: &mut ToolOutcome) -> Result<String, String> {
+    async fn dispatch(
+        &self,
+        role: AgentRole,
+        call: &ToolCall,
+        outcome: &mut ToolOutcome,
+    ) -> Result<String, String> {
         let ws = &self.workspace;
         match call.name.as_str() {
             "list_files" => {
@@ -190,7 +208,8 @@ impl Toolbox {
                 let args: CommandArgs = call.parse()?;
                 let runner = self.runner.as_ref().ok_or("commands are not available")?;
                 let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(120).clamp(1, 600));
-                let output = runner.run(ws.root(), &args.command, timeout).await?;
+                let user = if role == AgentRole::Critic { self.command_user.as_deref() } else { None };
+                let output = runner.run(ws.root(), &args.command, timeout, user).await?;
                 Ok(output.render(MAX_COMMAND_OUTPUT))
             }
             "submit" => {

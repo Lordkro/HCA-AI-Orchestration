@@ -3,7 +3,7 @@
 **Hybrid Cognitive Architecture: an autonomous AI development team**
 
 [![CI](https://github.com/Lordkro/HCA-AI-Orchestration/actions/workflows/ci.yml/badge.svg)](https://github.com/Lordkro/HCA-AI-Orchestration/actions/workflows/ci.yml)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/Lordkro/HCA-AI-Orchestration/pkgs/container/hca-orchestration)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/Lordkro/HCA-AI-Orchestration/pkgs/container/hca-ai-orchestration)
 [![License](https://img.shields.io/github/license/Lordkro/HCA-AI-Orchestration)](LICENSE)
 
 A team of AI agents that turns a product idea into working code. A project manager plans the work, research, spec and coder agents carry it out, and a critic reviews every result, running the tests in a locked-down Docker sandbox. It's a single Rust binary with SQLite storage and a web dashboard, and it works with local models through Ollama or hosted ones from Anthropic, OpenAI and xAI (Grok).

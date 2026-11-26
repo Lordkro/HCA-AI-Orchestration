@@ -172,6 +172,7 @@ fn access_token(data_dir: &Path) -> anyhow::Result<String> {
     let path = data_dir.join("access_token");
     if let Ok(token) = std::fs::read_to_string(&path) {
         if !token.trim().is_empty() {
+            restrict_token_file(&path)?;
             return Ok(token.trim().to_owned());
         }
     }
@@ -186,14 +187,47 @@ fn access_token(data_dir: &Path) -> anyhow::Result<String> {
     }
     let mut file = options.open(&path).with_context(|| format!("could not write {}", path.display()))?;
     file.write_all(token.as_bytes())?;
+    restrict_token_file(&path)?;
     tracing::info!(path = %path.display(), "created a new access token");
     Ok(token)
+}
+
+/// `OpenOptions::mode` only applies when the file is created. A token file
+/// that already exists (for example an empty file left world-readable) is
+/// tightened here too.
+fn restrict_token_file(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("could not restrict {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn dashboard_link(config: &Config, token: &str) -> String {
     let bind = config.server.bind;
     let host = if bind.ip().is_unspecified() { "127.0.0.1".to_owned() } else { bind.ip().to_string() };
-    format!("http://{host}:{}/#token={token}", bind.port())
+    format!("http://{host}:{}/#token={}", bind.port(), percent_encode(token))
+}
+
+/// Percent-encodes `token` for a URL fragment. Unreserved characters stay as they are.
+fn percent_encode(token: &str) -> String {
+    let mut encoded = String::with_capacity(token.len());
+    for byte in token.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            _ => {
+                const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                encoded.push('%');
+                encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+                encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+            }
+        }
+    }
+    encoded
 }
 
 async fn shutdown_signal() {
@@ -240,5 +274,25 @@ mod tests {
         assert_eq!(dashboard_link(&config, "abc"), "http://127.0.0.1:8080/#token=abc");
         config.server.bind = "0.0.0.0:9000".parse().unwrap();
         assert_eq!(dashboard_link(&config, "abc"), "http://127.0.0.1:9000/#token=abc");
+        assert_eq!(dashboard_link(&config, "a%#&"), "http://127.0.0.1:9000/#token=a%25%23%26");
+    }
+
+    #[test]
+    fn an_existing_token_file_is_made_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("access_token");
+        std::fs::write(&path, "abcdefghijklmnop").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        assert_eq!(access_token(dir.path()).unwrap(), "abcdefghijklmnop");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 }

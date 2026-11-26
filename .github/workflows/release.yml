@@ -17,9 +17,11 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
 
 jobs:
-  release:
+  prepare:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
@@ -41,32 +43,20 @@ jobs:
             echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Generate release notes
-        id: notes
-        run: |
-          TAG="${{ steps.tag.outputs.tag }}"
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
-          cat <<EOF > /tmp/release.md
-          ## HCA Orchestration ${TAG}
+  test:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-          See the [full changelog](https://github.com/${{ github.repository }}/compare/${PREV_TAG:+${PREV_TAG}...}${TAG}) for details.
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
 
-          ### What's new in this release
-
-          $(git log --oneline --no-decorate "${PREV_TAG:+${PREV_TAG}..}HEAD" 2>/dev/null | sed 's/^/- /' || echo "- Initial release")
-          EOF
-          echo "path=/tmp/release.md" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          body_path: ${{ steps.notes.outputs.path }}
-          generate_release_notes: true
-          make_latest: true
+      - name: Test
+        run: cargo test --locked
 
   docker:
-    needs: release
+    needs: [prepare, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -91,8 +81,40 @@ jobs:
           file: docker/hca.Dockerfile
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:${{ needs.release.outputs.version }}
+            ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:${{ needs.prepare.outputs.version }}
             ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:latest
           labels: |
-            org.opencontainers.image.version=${{ needs.release.outputs.version }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+  release:
+    needs: [prepare, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
+          cat <<EOF > /tmp/release.md
+          ## HCA Orchestration ${TAG}
+
+          See the [full changelog](https://github.com/${{ github.repository }}/compare/${PREV_TAG:+${PREV_TAG}...}${TAG}) for details.
+
+          ### What's new in this release
+
+          $(git log --oneline --no-decorate "${PREV_TAG:+${PREV_TAG}..}HEAD" 2>/dev/null | sed 's/^/- /' || echo "- Initial release")
+          EOF
+          echo "path=/tmp/release.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          body_path: ${{ steps.notes.outputs.path }}
+          generate_release_notes: true
+          make_latest: true

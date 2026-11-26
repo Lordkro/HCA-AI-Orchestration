@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{http_client, join_url};
-use crate::http::post_json;
+use crate::http::{null_as_default, parse_arguments, post_json};
 use crate::{
     BoxFuture, ChatRequest, ChatResponse, LlmError, LlmProvider, Message, RetryConfig, StopReason, ToolCall,
     Usage,
@@ -118,7 +118,7 @@ impl OllamaProvider {
             .map(|call| ToolCall {
                 id: format!("ollama-{}", self.next_call_id.fetch_add(1, Ordering::Relaxed)),
                 name: call.function.name,
-                arguments: call.function.arguments,
+                arguments: normalize_arguments(call.function.arguments),
             })
             .collect();
         let stop = match response.done_reason.as_deref() {
@@ -158,9 +158,9 @@ struct WireResponse {
 
 #[derive(Deserialize)]
 struct WireMessage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     content: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     tool_calls: Vec<WireToolCall>,
 }
 
@@ -172,6 +172,14 @@ struct WireToolCall {
 #[derive(Deserialize)]
 struct WireFunction {
     name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     arguments: Value,
+}
+
+fn normalize_arguments(value: Value) -> Value {
+    match value {
+        Value::String(raw) => parse_arguments(&raw),
+        Value::Null => serde_json::json!({}),
+        other => other,
+    }
 }

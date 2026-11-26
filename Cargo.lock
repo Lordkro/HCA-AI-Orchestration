@@ -884,6 +884,7 @@ dependencies = [
  "chrono",
  "hca-core",
  "hca-llm",
+ "rustix",
  "schemars 1.2.3",
  "serde",
  "serde_json",

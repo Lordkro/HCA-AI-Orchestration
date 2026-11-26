@@ -41,6 +41,9 @@ impl CommandOutput {
 pub trait CommandRunner: Send + Sync + std::fmt::Debug {
     /// Runs `command` with `workspace` as its working directory.
     ///
+    /// `user`, when set, is the container user (`uid:gid`) the command runs
+    /// as. The critic uses a user that can read the project but not write it.
+    ///
     /// Returns `Err` only if the command couldn't be started at all; a
     /// failing command is an `Ok` with a non-zero exit code.
     fn run<'a>(
@@ -48,6 +51,7 @@ pub trait CommandRunner: Send + Sync + std::fmt::Debug {
         workspace: &'a Path,
         command: &'a str,
         timeout: Duration,
+        user: Option<&'a str>,
     ) -> BoxFuture<'a, Result<CommandOutput, String>>;
 }
 

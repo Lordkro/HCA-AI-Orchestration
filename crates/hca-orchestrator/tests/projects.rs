@@ -372,3 +372,192 @@ async fn parallel_workers_do_each_task_once() {
     assert_eq!(s.models[&AgentRole::Coder].requests().len(), 4, "each task ran exactly once");
     assert_eq!(s.models[&AgentRole::Critic].requests().len(), 4);
 }
+
+#[tokio::test]
+async fn an_expired_last_attempt_fails_a_planless_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("hca.db")).await.unwrap();
+    let pm = Arc::new(plan(&json!([{"title": "T", "description": "Do it", "role": "coder"}])));
+    let mut config = OrchestratorConfig::new(dir.path().join("workspaces"));
+    config.job_attempts = 1;
+    config.lease = chrono::Duration::milliseconds(1);
+    let orchestrator = Orchestrator::new(store, llm_with_pm(pm), None, config);
+
+    let project = orchestrator.create_project("p", "idea").await.unwrap();
+    orchestrator
+        .store()
+        .claim("other", &[], chrono::Duration::milliseconds(1), chrono::Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    assert!(orchestrator.step("w").await.unwrap());
+    let project = orchestrator.store().project(project.id).await.unwrap();
+    assert_eq!(project.status(), ProjectStatus::Failed);
+    let Some(ProjectFailure::InvalidPlan(reason)) = project.failure() else {
+        panic!("{:?}", project.failure())
+    };
+    assert!(reason.contains("lease expired"), "{reason}");
+    assert_eq!(orchestrator.store().tasks(project.id).await.unwrap(), Vec::<Task>::new());
+}
+
+#[derive(Debug)]
+struct HoldProvider {
+    entered: tokio::sync::watch::Sender<bool>,
+    release: tokio::sync::watch::Receiver<bool>,
+    responses: std::sync::Mutex<std::collections::VecDeque<Result<ChatResponse, hca_llm::LlmError>>>,
+}
+
+impl hca_llm::LlmProvider for HoldProvider {
+    fn name(&self) -> &'static str {
+        "hold"
+    }
+
+    fn chat<'a>(
+        &'a self,
+        _request: &'a hca_llm::ChatRequest,
+    ) -> hca_llm::BoxFuture<'a, Result<ChatResponse, hca_llm::LlmError>> {
+        Box::pin(async move {
+            let _ = self.entered.send(true);
+            let mut release = self.release.clone();
+            loop {
+                if *release.borrow_and_update() {
+                    break;
+                }
+                if release.changed().await.is_err() {
+                    break;
+                }
+            }
+            self.responses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+                .unwrap_or_else(|| {
+                    Err(hca_llm::LlmError::Decode {
+                        provider: "hold".into(),
+                        message: "script ran out of responses".into(),
+                    })
+                })
+        })
+    }
+}
+
+fn plan_response() -> ChatResponse {
+    ChatResponse {
+        content: String::new(),
+        tool_calls: vec![ToolCall {
+            id: "plan".into(),
+            name: "submit_plan".into(),
+            arguments: json!({"tasks": [{"title": "T", "description": "Do it", "role": "coder"}]}),
+        }],
+        stop: StopReason::ToolUse,
+        usage: Usage { input_tokens: 10, output_tokens: 10 },
+    }
+}
+
+fn llm_with_pm(pm: Arc<dyn hca_llm::LlmProvider>) -> Llm {
+    let coder = Arc::new(ScriptedProvider::new().then_tool("submit", json!({"summary": "done"})));
+    let critic = Arc::new(approve(ScriptedProvider::new()));
+    let spec = Arc::new(ScriptedProvider::new());
+    let roles = HashMap::from([
+        (
+            AgentRole::Pm,
+            RoleModel { provider: pm, model: "pm-model".into(), max_tokens: 200, temperature: None },
+        ),
+        (
+            AgentRole::Coder,
+            RoleModel { provider: coder, model: "coder-model".into(), max_tokens: 200, temperature: None },
+        ),
+        (
+            AgentRole::Critic,
+            RoleModel { provider: critic, model: "critic-model".into(), max_tokens: 200, temperature: None },
+        ),
+        (
+            AgentRole::Spec,
+            RoleModel { provider: spec, model: "spec-model".into(), max_tokens: 200, temperature: None },
+        ),
+    ]);
+    Llm::new(roles)
+}
+
+#[tokio::test]
+async fn pausing_during_planning_returns_the_job_to_the_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("hca.db")).await.unwrap();
+    let (entered_tx, mut entered_rx) = tokio::sync::watch::channel(false);
+    let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+    let pm = Arc::new(HoldProvider {
+        entered: entered_tx,
+        release: release_rx,
+        responses: std::sync::Mutex::new(std::collections::VecDeque::from([
+            Ok(plan_response()),
+            Ok(plan_response()),
+        ])),
+    });
+    let config = OrchestratorConfig::new(dir.path().join("workspaces"));
+    let orchestrator = Arc::new(Orchestrator::new(store, llm_with_pm(pm), None, config));
+
+    let project = orchestrator.create_project("p", "idea").await.unwrap();
+    let worker = Arc::clone(&orchestrator);
+    let running = tokio::spawn(async move { worker.step("w").await });
+    loop {
+        if *entered_rx.borrow_and_update() {
+            break;
+        }
+        entered_rx.changed().await.unwrap();
+    }
+    orchestrator.pause(project.id).await.unwrap();
+    release_tx.send(true).unwrap();
+    assert!(running.await.unwrap().unwrap());
+
+    assert_eq!(orchestrator.store().tasks(project.id).await.unwrap(), Vec::<Task>::new());
+    let jobs = orchestrator.store().jobs(project.id, None).await.unwrap();
+    let plan_job = jobs.iter().find(|job| job.kind == hca_orchestrator::JOB_PLAN).unwrap();
+    assert_eq!(plan_job.status, JobStatus::Queued);
+    assert_eq!(plan_job.attempts, 1, "the paused attempt stays counted");
+
+    orchestrator.resume(project.id).await.unwrap();
+    orchestrator.run_until_idle("w").await.unwrap();
+    assert_eq!(orchestrator.store().project(project.id).await.unwrap().status(), ProjectStatus::Completed);
+}
+
+#[tokio::test]
+async fn a_task_with_no_live_job_times_out() {
+    let limits = Limits { max_retries: 0, ..Limits::default() };
+    let team = Team {
+        pm: plan(&json!([{"title": "T", "description": "Do it", "role": "coder"}])),
+        coder: ScriptedProvider::new().then_tool("submit", json!({"summary": "done"})),
+        critic: approve(ScriptedProvider::new()),
+        ..Team::default()
+    };
+    let s = setup(team, limits).await;
+    let o = &s.orchestrator;
+    let project = o.create_project("p", "idea").await.unwrap();
+    assert!(o.step("w").await.unwrap(), "plan");
+
+    let task = o.store().tasks(project.id).await.unwrap().remove(0);
+    assert_eq!(task.state(), TaskState::Assigned);
+    let later = chrono::Utc::now() + chrono::Duration::minutes(31);
+    o.enforce_timeouts(later).await.unwrap();
+    assert_eq!(
+        o.store().task(task.id).await.unwrap().state(),
+        TaskState::Assigned,
+        "a queued work job keeps the task alive"
+    );
+
+    let job = o
+        .store()
+        .claim("other", &[], chrono::Duration::minutes(5), chrono::Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.kind, hca_orchestrator::JOB_WORK);
+    o.store().complete(job.id, "other", chrono::Utc::now()).await.unwrap();
+
+    o.enforce_timeouts(later).await.unwrap();
+    let task = o.store().task(task.id).await.unwrap();
+    assert_eq!(task.state(), TaskState::Failed);
+    assert_eq!(task.failure(), Some(&hca_core::FailureReason::Timeout));
+    assert_eq!(o.store().project(project.id).await.unwrap().status(), ProjectStatus::Failed);
+}
