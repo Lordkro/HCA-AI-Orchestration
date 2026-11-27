@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "hca"
-version = "0.2.0-alpha.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -880,7 +880,7 @@ dependencies = [
 
 [[package]]
 name = "hca-agents"
-version = "0.2.0-alpha.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "hca-core",
@@ -898,7 +898,7 @@ dependencies = [
 
 [[package]]
 name = "hca-core"
-version = "0.2.0-alpha.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "proptest",
@@ -910,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "hca-llm"
-version = "0.2.0-alpha.0"
+version = "0.3.0"
 dependencies = [
  "hca-core",
  "reqwest",
@@ -924,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "hca-orchestrator"
-version = "0.2.0-alpha.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "hca-agents",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "hca-sandbox"
-version = "0.2.0-alpha.0"
+version = "0.3.0"
 dependencies = [
  "bollard",
  "bytes",
@@ -962,7 +962,7 @@ dependencies = [
 
 [[package]]
 name = "hca-server"
-version = "0.2.0-alpha.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "chrono",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "hca-store"
-version = "0.2.0-alpha.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "hca-core",
