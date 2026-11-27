@@ -875,6 +875,13 @@ mod tests {
         let ws = root.join("guard-test-project");
         std::fs::create_dir_all(&ws).unwrap();
         std::fs::write(ws.join("hello.py"), "print('hi')").unwrap();
+        // The guard refuses root, so the sandbox runs as 1000:1000, which
+        // need not own this folder (CI runs as 1001). Let any user write it;
+        // the critic is still refused, by its read-only mount.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ws, std::fs::Permissions::from_mode(0o777)).unwrap();
+        }
         let volume = format!("hca-guard-test-{}", std::process::id());
         let options = HashMap::from([
             ("type".to_owned(), "none".to_owned()),
