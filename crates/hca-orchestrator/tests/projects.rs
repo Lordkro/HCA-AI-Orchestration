@@ -515,7 +515,7 @@ async fn pausing_during_planning_returns_the_job_to_the_queue() {
     let jobs = orchestrator.store().jobs(project.id, None).await.unwrap();
     let plan_job = jobs.iter().find(|job| job.kind == hca_orchestrator::JOB_PLAN).unwrap();
     assert_eq!(plan_job.status, JobStatus::Queued);
-    assert_eq!(plan_job.attempts, 1, "the paused attempt stays counted");
+    assert_eq!(plan_job.attempts, 0, "pausing gives the attempt back");
 
     orchestrator.resume(project.id).await.unwrap();
     orchestrator.run_until_idle("w").await.unwrap();
@@ -560,4 +560,279 @@ async fn a_task_with_no_live_job_times_out() {
     assert_eq!(task.state(), TaskState::Failed);
     assert_eq!(task.failure(), Some(&hca_core::FailureReason::Timeout));
     assert_eq!(o.store().project(project.id).await.unwrap().status(), ProjectStatus::Failed);
+}
+
+fn llm_with(
+    pm: Arc<dyn hca_llm::LlmProvider>,
+    coder: Arc<dyn hca_llm::LlmProvider>,
+    critic: Arc<dyn hca_llm::LlmProvider>,
+) -> Llm {
+    let model = |provider: Arc<dyn hca_llm::LlmProvider>, name: &str| RoleModel {
+        provider,
+        model: name.into(),
+        max_tokens: 200,
+        temperature: None,
+    };
+    Llm::new(HashMap::from([
+        (AgentRole::Pm, model(pm, "pm-model")),
+        (AgentRole::Coder, model(coder, "coder-model")),
+        (AgentRole::Critic, model(critic, "critic-model")),
+    ]))
+}
+
+fn hold(
+    responses: Vec<ChatResponse>,
+) -> (Arc<HoldProvider>, tokio::sync::watch::Receiver<bool>, tokio::sync::watch::Sender<bool>) {
+    let (entered_tx, entered_rx) = tokio::sync::watch::channel(false);
+    let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+    let provider = Arc::new(HoldProvider {
+        entered: entered_tx,
+        release: release_rx,
+        responses: std::sync::Mutex::new(responses.into_iter().map(Ok).collect()),
+    });
+    (provider, entered_rx, release_tx)
+}
+
+async fn wait_until_entered(entered: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *entered.borrow_and_update() {
+            return;
+        }
+        entered.changed().await.unwrap();
+    }
+}
+
+fn tool_response(name: &str, arguments: serde_json::Value) -> ChatResponse {
+    ChatResponse {
+        content: String::new(),
+        tool_calls: vec![ToolCall { id: format!("{name}-call"), name: name.into(), arguments }],
+        stop: StopReason::ToolUse,
+        usage: Usage { input_tokens: 10, output_tokens: 10 },
+    }
+}
+
+#[tokio::test]
+async fn pausing_stops_a_running_agent_at_its_next_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("hca.db")).await.unwrap();
+    let (pm, mut entered, release) =
+        hold(vec![tool_response("list_files", json!({})), plan_response(), plan_response()]);
+    let config = OrchestratorConfig::new(dir.path().join("workspaces"));
+    let o = Arc::new(Orchestrator::new(store, llm_with_pm(pm.clone()), None, config));
+
+    let project = o.create_project("p", "idea").await.unwrap();
+    let worker = Arc::clone(&o);
+    let running = tokio::spawn(async move { worker.step("w").await });
+    wait_until_entered(&mut entered).await;
+    o.pause(project.id).await.unwrap();
+    release.send(true).unwrap();
+    assert!(running.await.unwrap().unwrap());
+
+    let left = pm.responses.lock().unwrap().len();
+    assert_eq!(left, 2, "the agent stopped before its second model call");
+    let jobs = o.store().jobs(project.id, None).await.unwrap();
+    assert_eq!(jobs[0].status, JobStatus::Queued);
+    assert_eq!(jobs[0].attempts, 0, "pausing doesn't use up an attempt");
+    assert_eq!(o.store().project(project.id).await.unwrap().tokens_used(), 20, "the call made is charged");
+
+    o.resume(project.id).await.unwrap();
+    o.run_until_idle("w").await.unwrap();
+    assert_eq!(o.store().project(project.id).await.unwrap().status(), ProjectStatus::Completed);
+}
+
+#[tokio::test]
+async fn a_persons_verdict_during_a_review_is_not_a_job_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("hca.db")).await.unwrap();
+    let pm = Arc::new(ScriptedProvider::new().then(Ok(plan_response())));
+    let coder = Arc::new(ScriptedProvider::new().then_tool("submit", json!({"summary": "done"})));
+    let (critic, mut entered, release) =
+        hold(vec![tool_response("submit_review", json!({"verdict": "request_changes", "feedback": "redo"}))]);
+    let config = OrchestratorConfig::new(dir.path().join("workspaces"));
+    let o = Arc::new(Orchestrator::new(store, llm_with(pm, coder, critic), None, config));
+
+    let project = o.create_project("p", "idea").await.unwrap();
+    let worker = Arc::clone(&o);
+    let running = tokio::spawn(async move { worker.run_until_idle("w").await });
+    wait_until_entered(&mut entered).await;
+    let task = o.store().tasks(project.id).await.unwrap().remove(0);
+    o.human_review(task.id, true, "Looks good to me").await.unwrap();
+    release.send(true).unwrap();
+    running.await.unwrap().unwrap();
+
+    assert_eq!(
+        o.store().task(task.id).await.unwrap().state(),
+        TaskState::Done,
+        "the person's verdict stands"
+    );
+    let jobs = o.store().jobs(project.id, None).await.unwrap();
+    let review = jobs.iter().find(|j| j.kind == hca_orchestrator::JOB_REVIEW).unwrap();
+    assert_eq!(review.status, JobStatus::Done);
+    assert_eq!(review.last_error, None, "no failed attempt was recorded");
+    assert_eq!(o.store().project(project.id).await.unwrap().status(), ProjectStatus::Completed);
+}
+
+#[derive(Debug, Default)]
+struct RecordingRunner {
+    calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl hca_agents::CommandRunner for RecordingRunner {
+    fn run<'a>(
+        &'a self,
+        _workspace: &'a std::path::Path,
+        command: &'a str,
+        _timeout: std::time::Duration,
+        session: hca_agents::Session<'a>,
+    ) -> hca_llm::BoxFuture<'a, Result<hca_agents::CommandOutput, String>> {
+        let user = session.user.unwrap_or("default");
+        self.calls.lock().unwrap().push(format!("run {command} in {} as {user}", session.id));
+        Box::pin(async { Ok(hca_agents::CommandOutput { exit_code: Some(0), ..Default::default() }) })
+    }
+
+    fn end_session<'a>(
+        &'a self,
+        _workspace: &'a std::path::Path,
+        id: &'a str,
+    ) -> hca_llm::BoxFuture<'a, Result<(), String>> {
+        self.calls.lock().unwrap().push(format!("end {id}"));
+        Box::pin(async { Ok(()) })
+    }
+
+    fn remove<'a>(&'a self, workspace: &'a std::path::Path) -> hca_llm::BoxFuture<'a, Result<(), String>> {
+        self.calls.lock().unwrap().push(format!("remove {}", workspace.display()));
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test]
+async fn every_run_ends_its_sandbox_session_before_handing_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("hca.db")).await.unwrap();
+    let pm = Arc::new(ScriptedProvider::new().then(Ok(plan_response())));
+    let coder = Arc::new(
+        ScriptedProvider::new()
+            .then_tool("run_command", json!({"command": "pytest"}))
+            .then_tool("submit", json!({"summary": "done"})),
+    );
+    let critic = Arc::new(
+        ScriptedProvider::new()
+            .then_tool("run_command", json!({"command": "pytest"}))
+            .then_tool("submit_review", json!({"verdict": "approve"})),
+    );
+    let runner = Arc::new(RecordingRunner::default());
+    let config = OrchestratorConfig::new(dir.path().join("workspaces"));
+    let o = Orchestrator::new(store, llm_with(pm, coder, critic), Some(runner.clone()), config);
+
+    let project = o.create_project("p", "idea").await.unwrap();
+    o.run_until_idle("w").await.unwrap();
+    assert_eq!(o.store().project(project.id).await.unwrap().status(), ProjectStatus::Completed);
+
+    let ws = o.workspace_path(project.id).canonicalize().unwrap();
+    let calls = runner.calls.lock().unwrap().clone();
+    let session = |call: &str| call.split(' ').nth(3).unwrap_or_default().to_owned();
+    let (coder, critic) = (session(&calls[1]), session(&calls[3]));
+    assert_ne!(coder, critic, "the critic never shares the coder's processes");
+    assert_eq!(
+        calls,
+        [
+            "end run1".to_owned(),
+            format!("run pytest in {coder} as default"),
+            format!("end {coder}"),
+            format!("run pytest in {critic} as {}", hca_agents::CRITIC_USER),
+            format!("end {critic}"),
+            format!("remove {}", ws.display()),
+        ],
+        "each run's processes stop before its work is handed on"
+    );
+}
+
+#[tokio::test]
+async fn a_person_can_restart_planning_after_it_failed() {
+    let team = Team {
+        pm: ScriptedProvider::new()
+            .then_text("I'd rather chat.")
+            .then_text("Still chatting.")
+            .then_text("Bye.")
+            .then(Ok(plan_response())),
+        coder: ScriptedProvider::new().then_tool("submit", json!({"summary": "done"})),
+        critic: approve(ScriptedProvider::new()),
+        ..Team::default()
+    };
+    let s = setup(team, Limits::default()).await;
+    let o = &s.orchestrator;
+    let project = o.create_project("p", "idea").await.unwrap();
+    o.run_until_idle("w").await.unwrap();
+    assert_eq!(o.store().project(project.id).await.unwrap().status(), ProjectStatus::Failed);
+
+    assert_eq!(o.restart(project.id).await.unwrap(), ProjectStatus::Active);
+    o.run_until_idle("w").await.unwrap();
+    let project = o.store().project(project.id).await.unwrap();
+    assert_eq!(project.status(), ProjectStatus::Completed, "planning ran again and the work got done");
+    assert!(o.restart(project.id).await.is_err(), "only failed projects restart");
+}
+
+#[tokio::test]
+async fn a_stuck_project_restarts_with_fresh_retries() {
+    let team = Team {
+        pm: plan(&json!([{"title": "T", "description": "Do it", "role": "coder"}])),
+        coder: ScriptedProvider::new()
+            .then_tool("submit", json!({"summary": "try 1"}))
+            .then_tool("submit", json!({"summary": "try 2"})),
+        critic: approve(reject(ScriptedProvider::new(), "No.")),
+        ..Team::default()
+    };
+    let limits = Limits { max_revisions: 0, max_retries: 0, ..Limits::default() };
+    let s = setup(team, limits).await;
+    let o = &s.orchestrator;
+    let project = o.create_project("p", "idea").await.unwrap();
+    o.run_until_idle("w").await.unwrap();
+    let stuck = o.store().project(project.id).await.unwrap();
+    assert_eq!(stuck.failure(), Some(&ProjectFailure::Stuck));
+
+    o.restart(project.id).await.unwrap();
+    let task = o.store().tasks(project.id).await.unwrap().remove(0);
+    assert_eq!((task.retries(), task.revisions()), (0, 0));
+    o.run_until_idle("w").await.unwrap();
+    assert_eq!(o.store().project(project.id).await.unwrap().status(), ProjectStatus::Completed);
+}
+
+#[tokio::test]
+async fn a_project_out_of_budget_needs_a_bigger_budget_to_restart() {
+    let expensive =
+        ChatResponse { usage: Usage { input_tokens: 9_000, output_tokens: 1_000 }, ..plan_response() };
+    let team = Team { pm: ScriptedProvider::new().then(Ok(expensive)), ..Team::default() };
+    let s = setup(team, Limits { project_token_budget: 8_000, ..Limits::default() }).await;
+    let o = &s.orchestrator;
+    let project = o.create_project("p", "idea").await.unwrap();
+    o.run_until_idle("w").await.unwrap();
+    let project = o.store().project(project.id).await.unwrap();
+    assert_eq!(project.failure(), Some(&ProjectFailure::BudgetExhausted));
+
+    let err = o.restart(project.id).await.unwrap_err().to_string();
+    assert!(err.contains("project_token_budget"), "{err}");
+    assert_eq!(
+        o.store().project(project.id).await.unwrap().status(),
+        ProjectStatus::Failed,
+        "nothing changed"
+    );
+}
+
+#[tokio::test]
+async fn a_budget_too_small_for_the_next_call_ends_the_project_at_once() {
+    let team = Team {
+        pm: plan(&json!([{"title": "T", "description": "Do it", "role": "coder"}])),
+        ..Team::default()
+    };
+    let s = setup(team, Limits { project_token_budget: 1_500, ..Limits::default() }).await;
+    let o = &s.orchestrator;
+    let project = o.create_project("p", "idea").await.unwrap();
+    o.run_until_idle("w").await.unwrap();
+
+    let project = o.store().project(project.id).await.unwrap();
+    assert_eq!(project.failure(), Some(&ProjectFailure::BudgetExhausted), "not a stuck task after retries");
+    assert_eq!((project.tokens_used(), project.tokens_reserved()), (0, 0), "nothing was spent");
+    assert!(s.models[&AgentRole::Pm].requests().is_empty(), "no call was made");
+    let jobs = o.store().jobs(project.id, None).await.unwrap();
+    assert!(jobs.iter().all(|j| j.attempts <= 1 && j.status != JobStatus::Dead), "no retry churn: {jobs:?}");
 }

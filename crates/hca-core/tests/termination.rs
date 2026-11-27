@@ -62,6 +62,31 @@ proptest! {
         prop_assert!(accepted <= Task::max_events(&limits));
     }
 
+    /// `Reopen` is a person's action and never generated above. With it,
+    /// each reopen grants at most one more `max_events` worth of work, so a
+    /// task still only runs as long as people keep restarting it.
+    #[test]
+    fn each_reopen_grants_one_bounded_round(
+        limits in limits_strategy(),
+        events in prop::collection::vec(prop_oneof![9 => event_strategy(), 1 => Just(TaskEvent::Reopen)], 0..500),
+    ) {
+        let mut task = Task::new(ProjectId::new(), "t", "", vec![], at(0));
+        let (mut accepted, mut reopens) = (0u64, 0u64);
+        for (step, event) in (1u64..).zip(events) {
+            let reopen = matches!(event, TaskEvent::Reopen);
+            if task.apply(event, &limits, at(step)).is_ok() {
+                if reopen {
+                    reopens += 1;
+                } else {
+                    accepted += 1;
+                }
+            }
+            prop_assert!(task.revisions() <= limits.max_revisions);
+            prop_assert!(task.retries() <= limits.max_retries);
+        }
+        prop_assert!(accepted <= (reopens + 1) * Task::max_events(&limits));
+    }
+
     /// A random task graph, random reviewer verdicts and random agent
     /// crashes: the project always ends as Completed or Stuck, within a
     /// bounded number of orchestrator steps, and never runs more tasks at

@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use hca_agents::{
-    Agent, AgentConfig, AgentError, CommandOutput, CommandRunner, Submission, Toolbox, Verdict, Workspace,
+    Agent, AgentConfig, AgentError, CommandOutput, CommandRunner, LocalMeter, MeterError, Submission,
+    Toolbox, UsageMeter, Verdict, Workspace,
 };
 use hca_core::{AgentRole, BudgetError, Limits, ProjectId, TokenBudget};
 use hca_llm::testing::ScriptedProvider;
@@ -26,7 +27,7 @@ impl CommandRunner for FakeRunner {
         workspace: &'a Path,
         command: &'a str,
         _timeout: Duration,
-        _user: Option<&'a str>,
+        _session: hca_agents::Session<'a>,
     ) -> BoxFuture<'a, Result<CommandOutput, String>> {
         self.calls.lock().unwrap().push((workspace.to_path_buf(), command.to_owned()));
         Box::pin(async {
@@ -62,8 +63,8 @@ fn setup(role: AgentRole, script: ScriptedProvider, with_runner: bool) -> Setup 
     Setup { llm, model, toolbox, runner, dir }
 }
 
-fn budget() -> TokenBudget {
-    TokenBudget::new(1_000_000)
+fn meter() -> LocalMeter {
+    LocalMeter::new(TokenBudget::new(1_000_000))
 }
 
 fn tool_calls(calls: &[(&str, serde_json::Value)]) -> ChatResponse {
@@ -103,8 +104,8 @@ async fn the_coder_writes_tests_runs_them_and_submits() {
     let s = setup(AgentRole::Coder, script, true);
     let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig::default());
 
-    let mut charged = Vec::new();
-    let run = agent.run(AgentRole::Coder, "Write fib.py", budget(), |u| charged.push(u)).await.unwrap();
+    let meter = meter();
+    let run = agent.run(AgentRole::Coder, "Write fib.py", &meter).await.unwrap();
 
     assert_eq!(
         run.submission,
@@ -113,7 +114,8 @@ async fn the_coder_writes_tests_runs_them_and_submits() {
     assert_eq!(run.steps, 4);
     assert_eq!(run.files_written, vec!["fib.py", "test_fib.py"]);
     assert_eq!(run.usage.total(), 80);
-    assert_eq!(charged.len(), 4, "usage is reported after every call");
+    assert_eq!(meter.calls().len(), 4, "usage is settled after every call");
+    assert_eq!(meter.budget().used(), 80);
     assert_eq!(errors(&run.transcript), Vec::<String>::new());
     assert!(std::fs::read_to_string(s.toolbox.workspace().root().join("fib.py"))
         .unwrap()
@@ -142,7 +144,7 @@ async fn refused_paths_are_reported_to_the_model_not_fatal() {
         .then_tool("submit", json!({"summary": "done"}));
     let s = setup(AgentRole::Coder, script, false);
     let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig::default());
-    let run = agent.run(AgentRole::Coder, "task", budget(), |_| {}).await.unwrap();
+    let run = agent.run(AgentRole::Coder, "task", &meter()).await.unwrap();
 
     let errors = errors(&run.transcript);
     assert_eq!(errors.len(), 3);
@@ -164,7 +166,7 @@ async fn the_critic_cannot_write_and_must_explain_rejections() {
         );
     let s = setup(AgentRole::Critic, script, true);
     let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig::default());
-    let run = agent.run(AgentRole::Critic, "Review fib.py", budget(), |_| {}).await.unwrap();
+    let run = agent.run(AgentRole::Critic, "Review fib.py", &meter()).await.unwrap();
 
     let Submission::Review(review) = run.submission else { panic!("expected a review") };
     assert_eq!(review.verdict, Verdict::RequestChanges);
@@ -185,7 +187,7 @@ async fn without_a_sandbox_there_is_no_run_command() {
         .then_tool("submit", json!({"summary": "done"}));
     let s = setup(AgentRole::Coder, script, false);
     let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig::default());
-    let run = agent.run(AgentRole::Coder, "task", budget(), |_| {}).await.unwrap();
+    let run = agent.run(AgentRole::Coder, "task", &meter()).await.unwrap();
 
     assert!(errors(&run.transcript)[0].contains("no tool named \"run_command\""));
     assert!(s.model.requests()[0].tools.iter().all(|t| t.name != "run_command"));
@@ -208,7 +210,7 @@ async fn the_pm_fixes_an_invalid_plan_before_it_is_accepted() {
         );
     let s = setup(AgentRole::Pm, script, false);
     let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig::default());
-    let run = agent.run(AgentRole::Pm, "Build a Fibonacci CLI", budget(), |_| {}).await.unwrap();
+    let run = agent.run(AgentRole::Pm, "Build a Fibonacci CLI", &meter()).await.unwrap();
 
     assert!(errors(&run.transcript)[0].contains("depends on 3"));
     let Submission::Plan(plan) = run.submission else { panic!("expected a plan") };
@@ -225,7 +227,7 @@ async fn nothing_runs_after_the_submission() {
     ])));
     let s = setup(AgentRole::Coder, script, false);
     let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig::default());
-    let run = agent.run(AgentRole::Coder, "task", budget(), |_| {}).await.unwrap();
+    let run = agent.run(AgentRole::Coder, "task", &meter()).await.unwrap();
 
     assert!(!s.toolbox.workspace().root().join("late.py").exists());
     assert!(errors(&run.transcript)[0].contains("already submitted"));
@@ -237,7 +239,7 @@ async fn runs_stop_at_the_step_limit() {
     let script = (0..5).fold(ScriptedProvider::new(), |s, _| s.then_tool("list_files", json!({})));
     let s = setup(AgentRole::Coder, script, false);
     let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig { max_steps: 3, max_reminders: 2 });
-    let err = agent.run(AgentRole::Coder, "task", budget(), |_| {}).await.unwrap_err();
+    let err = agent.run(AgentRole::Coder, "task", &meter()).await.unwrap_err();
     assert!(matches!(err, AgentError::StepLimit(3)), "{err:?}");
     assert_eq!(s.model.requests().len(), 3);
 }
@@ -248,7 +250,7 @@ async fn an_agent_that_never_submits_is_reminded_then_stopped() {
         ScriptedProvider::new().then_text("I think it's done.").then_text("Done!").then_text("Really done.");
     let s = setup(AgentRole::Coder, script, false);
     let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig { max_steps: 10, max_reminders: 2 });
-    let err = agent.run(AgentRole::Coder, "task", budget(), |_| {}).await.unwrap_err();
+    let err = agent.run(AgentRole::Coder, "task", &meter()).await.unwrap_err();
     assert!(matches!(err, AgentError::NoSubmission(3)), "{err:?}");
 
     let reminder = s.model.requests()[1].messages.last().unwrap().clone();
@@ -266,7 +268,7 @@ async fn a_cut_off_reply_is_continued_without_using_a_reminder() {
     let script = ScriptedProvider::new().then(cut_off).then_tool("submit", json!({"summary": "done"}));
     let s = setup(AgentRole::Research, script, false);
     let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig { max_steps: 10, max_reminders: 0 });
-    let run = agent.run(AgentRole::Research, "task", budget(), |_| {}).await.unwrap();
+    let run = agent.run(AgentRole::Research, "task", &meter()).await.unwrap();
     assert_eq!(run.steps, 2);
 }
 
@@ -282,10 +284,152 @@ async fn the_budget_stops_the_run_between_calls() {
     let s = setup(AgentRole::Coder, script, false);
     let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig::default());
 
-    let mut charged = Vec::new();
-    let err =
-        agent.run(AgentRole::Coder, "task", TokenBudget::new(40_000), |u| charged.push(u)).await.unwrap_err();
+    let meter = LocalMeter::new(TokenBudget::new(40_000));
+    let err = agent.run(AgentRole::Coder, "task", &meter).await.unwrap_err();
     assert!(matches!(err, AgentError::Llm(LlmError::Budget(BudgetError::Exhausted { .. }))), "{err:?}");
     assert_eq!(s.model.requests().len(), 1, "the second call is never sent");
-    assert_eq!(charged.iter().map(Usage::total).sum::<u64>(), 41_000, "the spent tokens were still reported");
+    assert_eq!(meter.budget().used(), 41_000, "the spent tokens were still recorded");
+}
+
+#[tokio::test]
+async fn usage_is_recorded_even_when_a_later_call_fails() {
+    let script = ScriptedProvider::new().then_tool("list_files", json!({})).then(Err(LlmError::Status {
+        provider: "scripted".into(),
+        status: 400,
+        body: "bad request".into(),
+    }));
+    let s = setup(AgentRole::Coder, script, false);
+    let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig::default());
+    let meter = meter();
+    let err = agent.run(AgentRole::Coder, "task", &meter).await.unwrap_err();
+    assert!(matches!(err, AgentError::Llm(LlmError::Status { status: 400, .. })), "{err:?}");
+    assert_eq!(meter.calls().len(), 2, "the failed call is settled too, releasing its reservation");
+    assert_eq!(meter.budget().used(), 20, "the first call's tokens are kept, the rejected one is free");
+}
+
+#[tokio::test]
+async fn a_call_that_may_have_been_billed_counts_its_worst_case() {
+    let script = ScriptedProvider::new()
+        .then(Err(LlmError::Decode { provider: "scripted".into(), message: "cut off".into() }));
+    let s = setup(AgentRole::Coder, script, false);
+    let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig::default());
+    let meter = meter();
+    agent.run(AgentRole::Coder, "task", &meter).await.unwrap_err();
+    let request = &s.model.requests()[0];
+    assert_eq!(
+        meter.budget().used(),
+        hca_llm::max_request_tokens(request),
+        "the response was lost, not the bill"
+    );
+}
+
+/// Stops the run on its second call, like a project paused mid-run.
+struct PausingMeter(std::sync::atomic::AtomicU32);
+
+impl UsageMeter for PausingMeter {
+    fn reserve(&self, _estimate: u64) -> hca_llm::BoxFuture<'_, Result<(), MeterError>> {
+        let calls = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            if calls >= 1 {
+                Err(MeterError::Stopped("the project was paused".into()))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn settle(
+        &self,
+        _estimate: u64,
+        _usage: Option<Usage>,
+    ) -> hca_llm::BoxFuture<'_, Result<(), MeterError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test]
+async fn a_meter_can_stop_the_run_between_steps() {
+    let script = ScriptedProvider::new()
+        .then_tool("list_files", json!({}))
+        .then_tool("submit", json!({"summary": "x"}));
+    let s = setup(AgentRole::Coder, script, false);
+    let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig::default());
+    let err = agent.run(AgentRole::Coder, "task", &PausingMeter(0.into())).await.unwrap_err();
+    assert!(matches!(err, AgentError::Stopped(ref reason) if reason.contains("paused")), "{err:?}");
+    assert_eq!(s.model.requests().len(), 1, "nothing is sent once stopped");
+}
+
+#[tokio::test]
+async fn read_file_can_return_a_range_of_lines() {
+    let script = ScriptedProvider::new()
+        .then_tool("read_file", json!({"path": "a.txt", "start_line": 2, "end_line": 3}))
+        .then_tool("submit", json!({"summary": "read it"}));
+    let s = setup(AgentRole::Research, script, false);
+    std::fs::write(s.toolbox.workspace().root().join("a.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+    let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig::default());
+    let run = agent.run(AgentRole::Research, "task", &meter()).await.unwrap();
+    let Message::ToolResult { content, .. } = &run.transcript[2] else { panic!("{:?}", run.transcript) };
+    assert_eq!(content, "[lines 2-3 of 4]\ntwo\nthree");
+}
+
+#[tokio::test]
+async fn a_tight_budget_trims_the_conversation_instead_of_failing() {
+    // Eight reads of a 20 KB file: the conversation's worst case soon
+    // passes the 100,000-token budget, though little has been spent.
+    let mut script = ScriptedProvider::new();
+    for _ in 0..8 {
+        script = script.then_tool("read_file", json!({"path": "big.txt"}));
+    }
+    let s = setup(AgentRole::Coder, script.then_tool("submit", json!({"summary": "read it all"})), false);
+    std::fs::write(s.dir.path().join("project/big.txt"), "x".repeat(20_000)).unwrap();
+    let agent = Agent::new(&s.llm, &s.toolbox, AgentConfig::default());
+    let meter = LocalMeter::new(TokenBudget::new(100_000));
+
+    let run = agent.run(AgentRole::Coder, "task", &meter).await.unwrap();
+    assert_eq!(run.steps, 9);
+    let requests = s.model.requests();
+    let untrimmed: u64 = 20_000 * 8;
+    let last = hca_llm::max_request_tokens(requests.last().unwrap());
+    assert!(last < 100_000 && last < untrimmed, "old reads were trimmed to fit: {last}");
+}
+
+#[tokio::test]
+async fn a_timed_out_call_is_charged_and_tried_again() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let reply = json!({
+        "choices": [{"message": {"role": "assistant", "content": null, "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {"name": "submit", "arguments": "{\"summary\": \"done\"}"}
+        }]}, "finish_reason": "tool_calls"}],
+        "usage": {"prompt_tokens": 30, "completion_tokens": 10}
+    });
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&reply).set_delay(Duration::from_secs(3)))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&reply))
+        .mount(&server)
+        .await;
+    let config: hca_llm::LlmConfig = serde_json::from_value(json!({
+        "providers": {"local": {"kind": "openai_compatible", "base_url": format!("{}/v1", server.uri())}},
+        "roles": {"coder": {"provider": "local", "model": "m", "max_tokens": 100}},
+        "timeout_secs": 1
+    }))
+    .unwrap();
+    let llm = config.build_with_env(|_| None).unwrap();
+    let s = setup(AgentRole::Coder, ScriptedProvider::new(), false);
+    let agent = Agent::new(&llm, &s.toolbox, AgentConfig::default());
+    let meter = meter();
+
+    let run = agent.run(AgentRole::Coder, "task", &meter).await.unwrap();
+    assert!(matches!(run.submission, Submission::Work { .. }), "the run went on");
+    let calls = meter.calls();
+    assert_eq!(calls.len(), 2, "both attempts are settled: {calls:?}");
+    assert!(calls[0].total() > 1_000, "the timed-out attempt counts its worst case: {calls:?}");
+    assert_eq!(calls[1].total(), 40, "the answered one its real usage");
 }

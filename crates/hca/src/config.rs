@@ -4,8 +4,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
-use hca_core::Limits;
-use hca_llm::LlmConfig;
+use hca_core::{AgentRole, Limits};
+use hca_llm::{LlmConfig, ProviderConfig, ASSUMED_CONTEXT_TOKENS, DEFAULT_OLLAMA_NUM_CTX};
 use hca_sandbox::SandboxConfig;
 use serde::{Deserialize, Serialize};
 
@@ -71,11 +71,13 @@ pub struct OrchestratorSection {
     pub max_steps: u32,
     /// Token budget for each agent's brief.
     pub brief_tokens: u64,
+    /// Longest one agent run may take before it fails as timed out.
+    pub run_timeout_minutes: u32,
 }
 
 impl Default for OrchestratorSection {
     fn default() -> Self {
-        Self { workers: 2, max_steps: 40, brief_tokens: 8_000 }
+        Self { workers: 2, max_steps: 40, brief_tokens: 8_000, run_timeout_minutes: 120 }
     }
 }
 
@@ -113,8 +115,9 @@ impl Config {
         Ok(config)
     }
 
-    /// Applies `HCA_BIND` and `HCA_DATA_DIR` from the environment, for
-    /// container setups where the file is shared but paths differ.
+    /// Applies `HCA_BIND`, `HCA_DATA_DIR` and `HCA_SANDBOX_VOLUME` from the
+    /// environment, for container setups where the file is shared but paths
+    /// differ.
     ///
     /// # Errors
     ///
@@ -127,6 +130,9 @@ impl Config {
         if let Some(dir) = env("HCA_DATA_DIR") {
             self.storage.data_dir = PathBuf::from(dir);
         }
+        if let Some(volume) = env("HCA_SANDBOX_VOLUME") {
+            self.sandbox.container.workspace_volume = Some(volume).filter(|v| !v.is_empty());
+        }
         Ok(())
     }
 
@@ -138,15 +144,63 @@ impl Config {
     pub fn parse(text: &str) -> anyhow::Result<Self> {
         let config: Self = toml::from_str(text)?;
         config.limits.validate()?;
-        if config.llm.roles.is_empty() {
-            bail!("[llm.roles] is empty: configure a model for at least the pm, coder and critic roles");
+        let missing: Vec<&str> = REQUIRED_ROLES
+            .iter()
+            .filter(|role| !config.llm.roles.contains_key(role))
+            .map(|role| role.as_str())
+            .collect();
+        if !missing.is_empty() {
+            bail!(
+                "[llm.roles] has no model for {}: the pm, coder and critic roles are required \
+                 (research and spec use the coder's model when they have none)",
+                missing.join(", ")
+            );
         }
         if config.orchestrator.workers == 0 {
             bail!("[orchestrator] workers must be at least 1");
         }
+        if config.orchestrator.run_timeout_minutes == 0 {
+            bail!("[orchestrator] run_timeout_minutes must be at least 1");
+        }
         Ok(config)
     }
+
+    /// Settings that work but will likely cause trouble, as sentences.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        for (role, settings) in &self.llm.roles {
+            let Some(provider) = self.llm.providers.get(&settings.provider) else { continue };
+            let window = match provider {
+                ProviderConfig::Ollama { num_ctx, .. } => num_ctx.unwrap_or(DEFAULT_OLLAMA_NUM_CTX),
+                ProviderConfig::OpenaiCompatible { context_tokens: Some(n), .. } => *n,
+                ProviderConfig::OpenaiCompatible { context_tokens: None, .. } => {
+                    warnings.push(format!(
+                        "provider {:?} (used by {role}) has no context_tokens, so HCA assumes a \
+                         {ASSUMED_CONTEXT_TOKENS}-token window; set context_tokens to the server's real one",
+                        settings.provider
+                    ));
+                    ASSUMED_CONTEXT_TOKENS
+                }
+                _ => continue,
+            };
+            let window = u64::from(window);
+            // The brief, the system prompt and tool definitions (~3,000),
+            // the output allowance, and room to work.
+            let needed = self.orchestrator.brief_tokens + 3_000 + u64::from(settings.max_tokens) + 4_000;
+            if window < needed {
+                warnings.push(format!(
+                    "{role} has a {window}-token context window, but its brief, output limit ({}) and \
+                     working room need about {needed}; raise the context window or lower max_tokens",
+                    settings.max_tokens
+                ));
+            }
+        }
+        warnings
+    }
 }
+
+/// Roles every project needs: planning, coding and review.
+const REQUIRED_ROLES: [AgentRole; 3] = [AgentRole::Pm, AgentRole::Coder, AgentRole::Critic];
 
 /// The config written by `hca init`.
 pub const EXAMPLE: &str = include_str!("../../../hca.example.toml");
@@ -172,7 +226,15 @@ mod tests {
             [llm.providers.local]
             kind = "ollama"
 
+            [llm.roles.pm]
+            provider = "local"
+            model = "qwen3:8b"
+
             [llm.roles.coder]
+            provider = "local"
+            model = "qwen3:8b"
+
+            [llm.roles.critic]
             provider = "local"
             model = "qwen3:8b"
             "#,
@@ -190,12 +252,46 @@ mod tests {
             .apply_overrides(|name| match name {
                 "HCA_BIND" => Some("0.0.0.0:9000".into()),
                 "HCA_DATA_DIR" => Some("/srv/hca".into()),
+                "HCA_SANDBOX_VOLUME" => Some("hca-workspaces".into()),
                 _ => None,
             })
             .unwrap();
         assert_eq!(config.server.bind.to_string(), "0.0.0.0:9000");
         assert_eq!(config.storage.data_dir, PathBuf::from("/srv/hca"));
+        assert_eq!(config.sandbox.container.workspace_volume.as_deref(), Some("hca-workspaces"));
         assert!(config.apply_overrides(|_| Some("nonsense".into())).is_err());
+    }
+
+    #[test]
+    fn small_context_windows_are_flagged() {
+        let config = Config::parse(EXAMPLE).unwrap();
+        assert_eq!(config.warnings(), Vec::<String>::new(), "the example fits");
+
+        let small = EXAMPLE.replace("num_ctx = 32768", "num_ctx = 8192");
+        let warnings = Config::parse(&small).unwrap().warnings();
+        assert!(warnings.iter().any(|w| w.contains("coder has a 8192-token context window")), "{warnings:?}");
+
+        let unset = EXAMPLE.replace("num_ctx = 32768\n", "");
+        assert_eq!(Config::parse(&unset).unwrap().warnings(), Vec::<String>::new(), "32768 is sent anyway");
+
+        let compatible = Config::parse(
+            "[llm.providers.vllm]\nkind = \"openai_compatible\"\nbase_url = \"http://vllm:8000/v1\"\n\
+             [llm.roles.pm]\nprovider = \"vllm\"\nmodel = \"m\"\n[llm.roles.coder]\nprovider = \"vllm\"\n\
+             model = \"m\"\n[llm.roles.critic]\nprovider = \"vllm\"\nmodel = \"m\"\n",
+        )
+        .unwrap();
+        let warnings = compatible.warnings();
+        assert!(warnings.iter().any(|w| w.contains("assumes a 32768-token window")), "{warnings:?}");
+    }
+
+    #[test]
+    fn the_core_roles_are_required() {
+        let err = Config::parse(
+            "[llm.providers.l]\nkind = \"ollama\"\n[llm.roles.coder]\nprovider = \"l\"\nmodel = \"m\"\n",
+        )
+        .unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("pm, critic"), "{message}");
     }
 
     #[test]

@@ -222,3 +222,15 @@ async fn pausing_and_cancelling_work_through_the_api() {
     assert_eq!((status, body["status"].as_str()), (StatusCode::OK, Some("cancelled")));
     assert_eq!(orchestrator.run_until_idle("w").await.unwrap(), 0, "cancelled work never runs");
 }
+
+#[tokio::test]
+async fn only_failed_projects_can_be_restarted() {
+    let (app, orchestrator, _dir) = app(vec![]).await;
+    let project = orchestrator.create_project("p", "idea").await.unwrap();
+    let url = format!("/api/projects/{}/restart", project.id);
+    let (status, body) = call(&app, Method::POST, &url, None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    let (status, body) = call(&app, Method::POST, &url, Some(TOKEN), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"].as_str().unwrap().contains("only a failed project"), "{body}");
+}

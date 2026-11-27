@@ -2,15 +2,26 @@
 #
 #   docker build -t hca-sandbox -f docker/sandbox.Dockerfile docker
 #   cp hca.example.toml hca.toml        # then edit [llm]
-#   mkdir -p data && sudo chown 1000:1000 data
+#   mkdir -p data/workspaces && sudo chown -R 1000:1000 data
 #   docker compose up -d
 #   docker compose logs hca   # shows the dashboard link
 #
 # Safety defaults:
 # - The dashboard port is published on 127.0.0.1 only.
-# - HCA never gets the Docker socket. It talks to a proxy that only allows
-#   the container and exec calls the sandbox needs.
+# - HCA never gets the Docker socket. It talks to the Docker guard
+#   (`hca docker-guard`), which lets through only what the sandbox does:
+#   containers of the sandbox image, non-root, without network or
+#   capabilities, with one project folder of the workspaces volume as their
+#   only mount, and exec as the container's user. Anything else, from
+#   `--privileged` to mounting `/` to the images API, gets 403. The guard
+#   sits on an internal network that only HCA joins.
+# - Workspaces are mounted as subpaths of the `hca-workspaces` volume, never
+#   as host paths. Docker refuses a subpath that leads out of the volume,
+#   so a project folder swapped for a symlink mounts nothing. The volume's
+#   folder is a mount point of its own in the HCA container, so HCA can't
+#   swap it either.
 # - Ollama and the proxy have no published ports.
+# - Images are pinned to versions; bump them deliberately.
 #
 # The data folder is mounted at the same absolute path inside and outside
 # the container, so sandbox bind mounts resolve on the host.
@@ -29,7 +40,8 @@ services:
       HCA_CONFIG: /etc/hca/hca.toml
       HCA_BIND: 0.0.0.0:8080
       HCA_DATA_DIR: ${PWD}/data
-      DOCKER_HOST: tcp://docker-proxy:2375
+      DOCKER_HOST: tcp://docker-guard:2375
+      HCA_SANDBOX_VOLUME: hca-workspaces
       # Cloud keys, only needed for providers your roles use.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       XAI_API_KEY: ${XAI_API_KEY:-}
@@ -37,30 +49,65 @@ services:
     volumes:
       - ./hca.toml:/etc/hca/hca.toml:ro
       - ${PWD}/data:${PWD}/data
+      # A mount point of its own: it can't be renamed or replaced from
+      # inside this container, so the workspaces volume always points at
+      # this folder.
+      - ${PWD}/data/workspaces:${PWD}/data/workspaces
     depends_on:
-      - docker-proxy
+      - docker-guard
+    networks:
+      - default
+      - docker-api
+    # HCA waits 20 s for running agents, then stops them, requeues their
+    # jobs and removes their containers before Docker kills the process.
+    stop_grace_period: 45s
 
-  docker-proxy:
-    image: tecnativa/docker-socket-proxy:latest
+  docker-guard:
+    build:
+      context: .
+      dockerfile: docker/hca.Dockerfile
+    image: hca:latest
     restart: unless-stopped
+    command: ["docker-guard"]
+    # Root only to open the Docker socket; no capabilities beyond that.
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     environment:
-      CONTAINERS: 1
-      EXEC: 1
-      POST: 1
-      INFO: 0
-      IMAGES: 0
-      NETWORKS: 0
-      VOLUMES: 0
+      # Reachable only on the internal docker-api network below.
+      HCA_GUARD_LISTEN: 0.0.0.0:2375
+      HCA_GUARD_IMAGE: hca-sandbox:latest
+      HCA_GUARD_VOLUME: hca-workspaces
+      # Set to "true" together with `[sandbox] network = true`.
+      HCA_GUARD_ALLOW_NETWORK: "false"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Not used; listed so Compose creates the volume.
+      - hca-workspaces:/unused:ro
+    networks:
+      - docker-api
 
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.40.18
     restart: unless-stopped
     profiles: ["ollama"]
     volumes:
       - ollama_data:/root/.ollama
     # Point [llm.providers.local] at http://ollama:11434 when using this.
 
+networks:
+  # HCA <-> Docker guard only. `internal` means no route to the outside.
+  docker-api:
+    internal: true
+
 volumes:
   ollama_data:
+  # The workspaces folder, for the sandbox containers to mount from.
+  hca-workspaces:
+    name: hca-workspaces
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/data/workspaces

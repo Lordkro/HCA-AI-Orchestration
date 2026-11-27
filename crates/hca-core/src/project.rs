@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{Limits, ProjectId, TokenBudget};
+use crate::{BudgetError, Limits, ProjectId, TokenBudget};
 
 /// Where a project is in its lifecycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -57,6 +57,10 @@ pub enum ProjectEvent {
     },
     /// A person stopped the project. From `Active` or `Paused`.
     Cancel,
+    /// A person restarts a failed project: back to `Active`. Only a person
+    /// sends this, never the automatic routing, so every project still ends
+    /// on its own.
+    Reopen,
 }
 
 /// Returned when an event isn't allowed in the project's current status.
@@ -67,6 +71,18 @@ pub struct ProjectTransitionError {
     pub from: ProjectStatus,
     /// The refused event's name.
     pub event: &'static str,
+}
+
+/// Why [`Project::reserve_tokens`] didn't reserve.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reservation {
+    /// The tokens are reserved.
+    Granted,
+    /// The call would fit what is spent, but not with the reservations of
+    /// calls still in flight. Wait for those to settle and ask again.
+    Busy,
+    /// The call can't fit even once every other call is settled.
+    Refused(BudgetError),
 }
 
 /// A product idea being built by the team.
@@ -81,6 +97,9 @@ pub struct Project {
     status: ProjectStatus,
     failure: Option<ProjectFailure>,
     tokens_used: u64,
+    /// Worst-case sizes of model calls in flight, not yet settled.
+    #[serde(default)]
+    tokens_reserved: u64,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -95,6 +114,7 @@ impl Project {
             status: ProjectStatus::Active,
             failure: None,
             tokens_used: 0,
+            tokens_reserved: 0,
             created_at: now,
             updated_at: now,
         }
@@ -113,6 +133,11 @@ impl Project {
     /// Tokens charged to the project so far.
     pub const fn tokens_used(&self) -> u64 {
         self.tokens_used
+    }
+
+    /// Tokens reserved for model calls still in flight.
+    pub const fn tokens_reserved(&self) -> u64 {
+        self.tokens_reserved
     }
 
     /// When the project was created.
@@ -153,6 +178,63 @@ impl Project {
         within
     }
 
+    /// Reserves `tokens`, a call's worst-case size, before the call is made.
+    ///
+    /// The call must fit the budget together with every reservation still
+    /// in flight, so parallel calls can never spend more than the budget
+    /// between them. Every reservation is later settled with
+    /// [`settle_tokens`](Self::settle_tokens).
+    pub fn reserve_tokens(&mut self, tokens: u64, limits: &Limits) -> Reservation {
+        let committed = self.tokens_used.saturating_add(self.tokens_reserved);
+        if let Err(error) = self.budget(limits).authorize(tokens) {
+            return Reservation::Refused(error);
+        }
+        if TokenBudget::with_used(limits.project_token_budget, committed).authorize(tokens).is_err() {
+            return Reservation::Busy;
+        }
+        self.tokens_reserved = self.tokens_reserved.saturating_add(tokens);
+        Reservation::Granted
+    }
+
+    /// Settles a reservation of `reserved` tokens: releases it and charges
+    /// `charged`, what the call actually cost (the full reservation when
+    /// that is unknown). Settles in any status, since a call can finish
+    /// after its project ended. Exhausting the budget fails an active or
+    /// paused project, as [`charge_tokens`](Self::charge_tokens) does.
+    ///
+    /// Returns `true` if the project is still within budget.
+    pub fn settle_tokens(
+        &mut self,
+        reserved: u64,
+        charged: u64,
+        limits: &Limits,
+        now: DateTime<Utc>,
+    ) -> bool {
+        self.tokens_reserved = self.tokens_reserved.saturating_sub(reserved);
+        self.charge_tokens(charged, limits, now)
+    }
+
+    /// Charges every open reservation in full. Run at startup: a call that
+    /// was in flight when the process stopped may have been billed, and
+    /// nobody is left to settle it.
+    ///
+    /// Returns `true` if the project is still within budget.
+    pub fn charge_reservations(&mut self, limits: &Limits, now: DateTime<Utc>) -> bool {
+        let reserved = std::mem::take(&mut self.tokens_reserved);
+        self.charge_tokens(reserved, limits, now)
+    }
+
+    /// Fails the project because the remaining budget can't cover the next
+    /// model call, though it isn't spent to the last token. Does nothing to
+    /// a project that already ended.
+    pub fn exhaust_budget(&mut self, now: DateTime<Utc>) {
+        if !self.status.is_terminal() {
+            self.status = ProjectStatus::Failed;
+            self.failure = Some(ProjectFailure::BudgetExhausted);
+            self.updated_at = now;
+        }
+    }
+
     /// Applies an event, changing status only if the event is allowed.
     ///
     /// # Errors
@@ -173,6 +255,7 @@ impl Project {
             ProjectEvent::Complete => "complete",
             ProjectEvent::Fail { .. } => "fail",
             ProjectEvent::Cancel => "cancel",
+            ProjectEvent::Reopen => "reopen",
         };
 
         let to = match (from, event) {
@@ -184,6 +267,10 @@ impl Project {
                 S::Failed
             }
             (S::Active | S::Paused, ProjectEvent::Cancel) => S::Cancelled,
+            (S::Failed, ProjectEvent::Reopen) => {
+                self.failure = None;
+                S::Active
+            }
             _ => return Err(ProjectTransitionError { from, event: name }),
         };
 
@@ -259,5 +346,49 @@ mod tests {
         p.apply(ProjectEvent::Complete, now()).unwrap();
         p.charge_tokens(100, &limits, now());
         assert_eq!(p.status(), ProjectStatus::Completed);
+    }
+
+    #[test]
+    fn only_failed_projects_reopen() {
+        let mut p = project();
+        assert!(p.apply(ProjectEvent::Reopen, now()).is_err(), "an active project can't reopen");
+        p.apply(ProjectEvent::Fail { reason: ProjectFailure::Stuck }, now()).unwrap();
+        assert_eq!(p.apply(ProjectEvent::Reopen, now()), Ok(ProjectStatus::Active));
+        assert_eq!(p.failure(), None);
+
+        let mut done = project();
+        done.apply(ProjectEvent::Complete, now()).unwrap();
+        assert!(done.apply(ProjectEvent::Reopen, now()).is_err(), "completed stays completed");
+        let mut cancelled = project();
+        cancelled.apply(ProjectEvent::Cancel, now()).unwrap();
+        assert!(cancelled.apply(ProjectEvent::Reopen, now()).is_err(), "cancelled stays cancelled");
+    }
+
+    #[test]
+    fn reservations_keep_parallel_calls_within_the_budget() {
+        let limits = Limits { project_token_budget: 1_000, ..Limits::default() };
+        let mut p = project();
+        assert_eq!(p.reserve_tokens(700, &limits), Reservation::Granted);
+        assert_eq!(p.reserve_tokens(700, &limits), Reservation::Busy, "fits once the first call settles");
+        assert!(matches!(p.reserve_tokens(1_001, &limits), Reservation::Refused(_)), "never fits");
+
+        assert!(p.settle_tokens(700, 250, &limits, now()));
+        assert_eq!((p.tokens_used(), p.tokens_reserved()), (250, 0), "the real cost, not the worst case");
+        assert_eq!(p.reserve_tokens(700, &limits), Reservation::Granted);
+
+        // A call nobody settled (the process died) counts in full.
+        assert!(p.charge_reservations(&limits, now()));
+        assert_eq!((p.tokens_used(), p.tokens_reserved()), (950, 0));
+        assert!(matches!(p.reserve_tokens(100, &limits), Reservation::Refused(_)));
+        p.exhaust_budget(now());
+        assert_eq!(p.failure(), Some(&ProjectFailure::BudgetExhausted));
+    }
+
+    #[test]
+    fn projects_saved_before_reservations_load() {
+        let mut json = serde_json::to_value(project()).unwrap();
+        json.as_object_mut().unwrap().remove("tokens_reserved");
+        let p: Project = serde_json::from_value(json).unwrap();
+        assert_eq!(p.tokens_reserved(), 0);
     }
 }

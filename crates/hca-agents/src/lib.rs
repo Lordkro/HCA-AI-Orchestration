@@ -7,13 +7,15 @@
 //! task needs, within a step limit and the project's token budget.
 
 mod agent;
+mod meter;
 mod runner;
 mod submission;
 mod tools;
 mod workspace;
 
 pub use agent::{Agent, AgentConfig, AgentError, AgentRun};
-pub use runner::{CommandOutput, CommandRunner, CRITIC_USER};
+pub use meter::{LocalMeter, MeterError, UsageMeter};
+pub use runner::{CommandOutput, CommandRunner, Session, CRITIC_USER};
 pub use submission::{Plan, PlanRole, PlannedTask, Review, Submission, SubmitArgs, Verdict};
 pub use tools::{ToolOutcome, Toolbox};
 pub use workspace::{Workspace, WorkspaceError};

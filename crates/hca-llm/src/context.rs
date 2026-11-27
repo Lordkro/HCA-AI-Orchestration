@@ -160,20 +160,28 @@ fn render(section: &Section, body: &str) -> String {
 /// token per character, so this many characters is the budget for the kept text.
 /// The omission note is extra.
 fn cut(body: &str, tokens: u64, keep: Truncate) -> String {
-    let keep_chars = usize::try_from(tokens).unwrap_or(usize::MAX);
-    let total = body.chars().count();
-    if total <= keep_chars {
+    // The inverse of `estimate_tokens`: three bytes per token, cut on a
+    // character boundary.
+    let keep_bytes = usize::try_from(tokens.saturating_mul(3)).unwrap_or(usize::MAX);
+    if body.len() <= keep_bytes {
         return body.to_owned();
     }
-    let omitted = total - keep_chars;
     match keep {
         Truncate::KeepEnd => {
-            let tail: String = body.chars().skip(omitted).collect();
-            format!("[... {omitted} characters omitted ...]\n{tail}")
+            let mut start = body.len() - keep_bytes;
+            while !body.is_char_boundary(start) {
+                start += 1;
+            }
+            let omitted = body[..start].chars().count();
+            format!("[... {omitted} characters omitted ...]\n{}", &body[start..])
         }
         Truncate::KeepStart | Truncate::Never => {
-            let head: String = body.chars().take(keep_chars).collect();
-            format!("{head}\n[... {omitted} characters omitted ...]")
+            let mut end = keep_bytes;
+            while !body.is_char_boundary(end) {
+                end -= 1;
+            }
+            let omitted = body[end..].chars().count();
+            format!("{}\n[... {omitted} characters omitted ...]", &body[..end])
         }
     }
 }

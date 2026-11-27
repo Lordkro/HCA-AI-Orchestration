@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Duration, Utc};
 use hca_core::{
-    AgentRole, FailureReason, Limits, PlanError, Project, ProjectEvent, ProjectFailure, ProjectStatus, Task,
-    TaskEvent, TaskState, TransitionError,
+    AgentRole, FailureReason, Limits, PlanError, Project, ProjectEvent, ProjectFailure, ProjectStatus,
+    Reservation, Task, TaskEvent, TaskState, TransitionError,
 };
 use hca_store::{JobStatus, NewJob, Store, StoreError};
 use serde_json::json;
@@ -271,10 +271,54 @@ async fn attempts_are_bounded_then_the_job_is_dead() {
     assert_eq!(store.claim("w", &[], Duration::minutes(5), now).await.unwrap(), None);
     let job = store.job(id).await.unwrap();
     assert_eq!(job.last_error.as_deref(), Some("model timed out again"));
+}
 
-    store.requeue_dead(id, now).await.unwrap();
-    let job = store.claim("w", &[], Duration::minutes(5), now).await.unwrap().unwrap();
-    assert_eq!(job.attempts, 1);
+#[tokio::test]
+async fn releasing_a_job_gives_its_attempt_back() {
+    let (store, _dir) = store().await;
+    let (project, _) = project_with_plan(&store, &[&[]]).await;
+    let id =
+        store.enqueue(&NewJob::new(project.id, "code", json!({}), t0()).max_attempts(1), t0()).await.unwrap();
+    // Paused and resumed three times mid-job: none of it counts as a failure.
+    for _ in 0..3 {
+        let job = store.claim("w", &[], Duration::minutes(5), t0()).await.unwrap().unwrap();
+        assert_eq!(job.status, JobStatus::Running);
+        assert_eq!(job.attempts, 1);
+        store.release(id, "w", t0()).await.unwrap();
+        assert_eq!(store.job(id).await.unwrap().attempts, 0);
+    }
+    let job = store.claim("w", &[], Duration::minutes(5), t0()).await.unwrap().unwrap();
+    assert_eq!(job.status, JobStatus::Running, "the job still has its one attempt");
+}
+
+#[tokio::test]
+async fn orphaned_jobs_are_requeued_at_startup_and_keep_their_attempt() {
+    let (store, _dir) = store().await;
+    let (project, _) = project_with_plan(&store, &[&[]]).await;
+    let id =
+        store.enqueue(&NewJob::new(project.id, "code", json!({}), t0()).max_attempts(2), t0()).await.unwrap();
+    store.claim("old-process", &[], Duration::minutes(15), t0()).await.unwrap().unwrap();
+
+    assert_eq!(store.requeue_orphans(t0()).await.unwrap(), 1);
+    let job = store.claim("new-process", &[], Duration::minutes(15), t0()).await.unwrap().unwrap();
+    assert_eq!(job.id, id, "no need to wait 15 minutes for the old lease");
+    assert_eq!(job.attempts, 2, "the crashed attempt still counts");
+    assert_eq!(store.open_jobs(project.id).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn jobs_interrupted_at_shutdown_are_requeued_with_their_attempt_back() {
+    let (store, _dir) = store().await;
+    let (project, _) = project_with_plan(&store, &[&[]]).await;
+    let id =
+        store.enqueue(&NewJob::new(project.id, "code", json!({}), t0()).max_attempts(1), t0()).await.unwrap();
+    store.claim("stopping", &[], Duration::minutes(15), t0()).await.unwrap().unwrap();
+
+    assert_eq!(store.requeue_interrupted(t0()).await.unwrap(), 1);
+    let job = store.job(id).await.unwrap();
+    assert_eq!((job.status, job.attempts), (JobStatus::Queued, 0));
+    let job = store.claim("next-start", &[], Duration::minutes(15), t0()).await.unwrap().unwrap();
+    assert_eq!(job.id, id, "its only attempt is still there");
 }
 
 #[tokio::test]
@@ -413,4 +457,49 @@ async fn activity_is_logged_in_order() {
     let latest = store.latest_activity(tasks[0].id, "deliverable").await.unwrap().unwrap();
     assert_eq!(latest.entry.content, "second");
     assert!(store.latest_activity(tasks[0].id, "plan").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn reservations_are_saved_settled_and_charged_after_a_crash() {
+    let (store, _dir) = store().await;
+    let (project, tasks) = project_with_plan(&store, &[&[]]).await;
+    let limits = Limits { project_token_budget: 1_000, ..Limits::default() };
+
+    assert_eq!(store.reserve_usage(project.id, 600, &limits).await.unwrap(), Reservation::Granted);
+    assert_eq!(store.reserve_usage(project.id, 600, &limits).await.unwrap(), Reservation::Busy);
+    assert!(store.settle_usage(project.id, Some(tasks[0].id), 600, 200, &limits, t0()).await.unwrap());
+    let saved = store.project(project.id).await.unwrap();
+    assert_eq!((saved.tokens_used(), saved.tokens_reserved()), (200, 0));
+    assert_eq!(store.task(tasks[0].id).await.unwrap().tokens_used(), 200);
+
+    // The process dies mid-call: the reservation stays saved and counts in
+    // full at the next start.
+    store.reserve_usage(project.id, 700, &limits).await.unwrap();
+    assert_eq!(store.charge_open_reservations(&limits, t0()).await.unwrap(), 1);
+    let saved = store.project(project.id).await.unwrap();
+    assert_eq!((saved.tokens_used(), saved.tokens_reserved()), (900, 0));
+    assert_eq!(saved.status(), ProjectStatus::Active);
+}
+
+#[tokio::test]
+async fn a_call_that_can_never_fit_ends_the_project_as_out_of_budget() {
+    let (store, _dir) = store().await;
+    let (project, _) = project_with_plan(&store, &[&[]]).await;
+    store.enqueue(&NewJob::new(project.id, "code", json!({}), t0()), t0()).await.unwrap();
+    let limits = Limits { project_token_budget: 1_000, ..Limits::default() };
+
+    let refused = store.reserve_usage(project.id, 1_500, &limits).await.unwrap();
+    assert!(matches!(refused, Reservation::Refused(_)), "{refused:?}");
+    assert_eq!(
+        store.project(project.id).await.unwrap().status(),
+        ProjectStatus::Active,
+        "a smaller call may fit"
+    );
+    assert!(store.exhaust_budget(project.id, t0()).await.unwrap());
+    assert!(!store.exhaust_budget(project.id, t0()).await.unwrap(), "only once");
+    let saved = store.project(project.id).await.unwrap();
+    assert_eq!(saved.failure(), Some(&ProjectFailure::BudgetExhausted));
+    assert!(store.open_jobs(project.id).await.unwrap().is_empty(), "its jobs are cancelled");
+    let paused = store.reserve_usage(project.id, 1, &limits).await.unwrap_err();
+    assert!(matches!(paused, StoreError::ProjectNotActive(ProjectStatus::Failed)), "{paused:?}");
 }

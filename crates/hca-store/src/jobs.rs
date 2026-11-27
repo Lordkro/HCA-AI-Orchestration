@@ -241,19 +241,21 @@ impl Store {
         Ok(())
     }
 
-    /// Puts a job this worker still holds back on the queue.
+    /// Puts a job this worker still holds back on the queue, and gives back
+    /// the attempt its claim used.
     ///
-    /// Attempts already counted stay counted, and the job may run again
-    /// immediately. Used when a project is paused in the middle of a job:
-    /// the work is not finished and must not be marked done.
+    /// Used when a project is paused in the middle of a job, or HCA is
+    /// shutting down: the work is not finished and must not be marked done,
+    /// and nothing failed, so pausing and resuming never uses up attempts.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError::LeaseLost`] if this worker no longer holds it.
     pub async fn release(&self, id: JobId, worker: &str, now: DateTime<Utc>) -> Result<()> {
         let result = sqlx::query(
-            "UPDATE jobs SET status = 'queued', locked_by = NULL, locked_until = NULL, \
-             run_after = ?, updated_at = ? WHERE id = ? AND status = 'running' AND locked_by = ?",
+            "UPDATE jobs SET status = 'queued', attempts = MAX(attempts - 1, 0), locked_by = NULL, \
+             locked_until = NULL, run_after = ?, updated_at = ? \
+             WHERE id = ? AND status = 'running' AND locked_by = ?",
         )
         .bind(time::encode(now))
         .bind(time::encode(now))
@@ -323,27 +325,6 @@ impl Store {
         parse_status(&status)
     }
 
-    /// Gives a dead job a fresh set of attempts.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError::NotFound`] if there is no dead job with that id.
-    pub async fn requeue_dead(&self, id: JobId, now: DateTime<Utc>) -> Result<()> {
-        let result = sqlx::query(
-            "UPDATE jobs SET status = 'queued', attempts = 0, run_after = ?, updated_at = ? \
-             WHERE id = ? AND status = 'dead'",
-        )
-        .bind(time::encode(now))
-        .bind(time::encode(now))
-        .bind(id.0)
-        .execute(&self.writer)
-        .await?;
-        if result.rows_affected() == 0 {
-            return Err(StoreError::NotFound { kind: "dead job", id: id.to_string() });
-        }
-        Ok(())
-    }
-
     /// Loads a job.
     ///
     /// # Errors
@@ -382,6 +363,68 @@ impl Store {
             }
         };
         rows.iter().map(job_from_row).collect()
+    }
+
+    /// A project's queued and running jobs, oldest first. Uses the
+    /// `(project_id, status)` index, so it stays cheap however long the
+    /// project's history gets.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Database`] or a decoding error on failure.
+    pub async fn open_jobs(&self, project_id: ProjectId) -> Result<Vec<Job>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {JOB_COLUMNS} FROM jobs WHERE project_id = ? AND status IN ('queued', 'running') ORDER BY id"
+        ))
+        .bind(project_id.to_string())
+        .fetch_all(&self.reader)
+        .await?;
+        rows.iter().map(job_from_row).collect()
+    }
+
+    /// Puts every running job back on the queue. Called once at startup,
+    /// before any worker runs: a job still marked running was held by a
+    /// process that is gone, so there is no reason to wait for its lease.
+    /// The attempt it used stays counted, so a job that crashes the process
+    /// every time still ends up dead.
+    ///
+    /// Returns how many jobs were requeued.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Database`] on failure.
+    pub async fn requeue_orphans(&self, now: DateTime<Utc>) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE jobs SET status = 'queued', locked_by = NULL, locked_until = NULL, run_after = ?, \
+             updated_at = ? WHERE status = 'running'",
+        )
+        .bind(time::encode(now))
+        .bind(time::encode(now))
+        .execute(&self.writer)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Puts every running job back on the queue and gives back the attempt
+    /// it was using. Called at shutdown, after the workers were stopped on
+    /// purpose: the work didn't fail, it was interrupted, so it resumes at
+    /// once at the next start.
+    ///
+    /// Returns how many jobs were requeued.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Database`] on failure.
+    pub async fn requeue_interrupted(&self, now: DateTime<Utc>) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE jobs SET status = 'queued', locked_by = NULL, locked_until = NULL, run_after = ?, \
+             updated_at = ?, attempts = MAX(attempts - 1, 0) WHERE status = 'running'",
+        )
+        .bind(time::encode(now))
+        .bind(time::encode(now))
+        .execute(&self.writer)
+        .await?;
+        Ok(result.rows_affected())
     }
 }
 

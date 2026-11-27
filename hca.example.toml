@@ -18,12 +18,13 @@ max_retries = 1               # retries of a failed task
 max_tasks = 50                # tasks per project
 max_parallel_tasks = 3        # tasks running at once per project
 project_token_budget = 500000 # tokens per project, all calls included
-task_timeout_minutes = 30
+task_timeout_minutes = 30    # a task with no job working on it fails after this
 
 [orchestrator]
 workers = 2       # jobs processed at once, across projects
 max_steps = 40    # model calls per agent run
 brief_tokens = 8000
+run_timeout_minutes = 120  # one agent run (all its model calls) fails after this
 
 [sandbox]
 # Agents run commands (tests, scripts) only inside these containers.
@@ -33,8 +34,12 @@ image = "hca-sandbox:latest"
 memory_mb = 2048
 cpus = 2.0
 pids_limit = 256
-network = false   # no network inside sandboxes
+network = false   # no network inside sandboxes (with the Docker guard, also set HCA_GUARD_ALLOW_NETWORK)
 user = "1000:1000"
+# A Docker volume over the workspaces folder: containers then mount their
+# project as a volume subpath instead of a host path. The Docker guard
+# requires this; Compose sets it with HCA_SANDBOX_VOLUME.
+# workspace_volume = "hca-workspaces"
 
 # ---------------------------------------------------------------------------
 # Models. Define providers, then pick a provider and model for each role.
@@ -47,7 +52,10 @@ timeout_secs = 600
 [llm.providers.local]
 kind = "ollama"
 base_url = "http://localhost:11434"
-num_ctx = 16384
+# Context window. Conversations are trimmed to fit it, so Ollama never has to
+# cut the start of a prompt. It must hold the brief (brief_tokens), the
+# output limit (max_tokens) and room to work; `hca check` warns if not.
+num_ctx = 32768
 
 [llm.providers.claude]
 kind = "anthropic"            # key from ANTHROPIC_API_KEY

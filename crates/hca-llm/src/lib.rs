@@ -22,12 +22,15 @@ mod providers;
 pub mod testing;
 mod types;
 
-pub use config::{LlmConfig, MaxTokensField, ProviderConfig, RetryConfig, RoleConfig};
+pub use config::{
+    LlmConfig, MaxTokensField, ProviderConfig, RetryConfig, RoleConfig, ASSUMED_CONTEXT_TOKENS,
+    DEFAULT_OLLAMA_NUM_CTX,
+};
 pub use context::{BuiltContext, ContextBuilder, Priority, Truncate};
 pub use error::LlmError;
 pub use llm::{Conversation, Llm, RoleModel};
 pub use providers::{AnthropicProvider, OllamaProvider, OpenAiCompatibleProvider};
 pub use types::{
-    estimate_request_tokens, estimate_tokens, BoxFuture, ChatRequest, ChatResponse, LlmProvider, Message,
-    StopReason, ToolCall, ToolSpec, Usage,
+    estimate_request_tokens, estimate_tokens, max_request_tokens, BoxFuture, ChatRequest, ChatResponse,
+    LlmProvider, Message, StopReason, ToolCall, ToolSpec, Usage,
 };

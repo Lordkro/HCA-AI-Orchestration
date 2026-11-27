@@ -144,6 +144,11 @@ impl LlmProvider for OllamaProvider {
     fn chat<'a>(&'a self, request: &'a ChatRequest) -> BoxFuture<'a, Result<ChatResponse, LlmError>> {
         Box::pin(self.send(request))
     }
+    /// `num_ctx`, which Ollama honours by cutting the start of longer
+    /// prompts. Unknown when unset: Ollama then picks its own size.
+    fn context_window(&self) -> Option<u64> {
+        self.num_ctx.map(u64::from)
+    }
 }
 
 #[derive(Deserialize)]

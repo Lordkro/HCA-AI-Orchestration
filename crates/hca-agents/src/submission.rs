@@ -128,11 +128,16 @@ impl Plan {
             }
         }
 
+        // Tasks are ordered by creation time, with the random id breaking
+        // ties. One microsecond apart (the stored precision) keeps the PM's
+        // order for scheduling and for the dashboard.
         let mut tasks: Vec<Task> = self
             .tasks
             .iter()
-            .map(|t| {
-                Task::new(project_id, t.title.trim(), t.description.trim(), vec![], now)
+            .zip(0_i64..)
+            .map(|(t, i)| {
+                let created = now + chrono::Duration::microseconds(i);
+                Task::new(project_id, t.title.trim(), t.description.trim(), vec![], created)
                     .with_role(t.role.into())
             })
             .collect();
@@ -173,6 +178,18 @@ mod tests {
         assert_eq!(tasks[1].depends_on, vec![tasks[0].id]);
         assert_eq!(tasks[2].depends_on.len(), 2, "duplicate dependencies are merged");
         assert_eq!(tasks[1].role, Some(AgentRole::Coder));
+    }
+
+    #[test]
+    fn plans_keep_their_order() {
+        let plan =
+            Plan { tasks: (0..20).map(|i| planned(&format!("T{i}"), PlanRole::Coder, vec![])).collect() };
+        let mut tasks = plan.into_tasks(ProjectId::new(), &Limits::default(), now()).unwrap();
+        // The store and the scheduler sort by (created_at, id).
+        tasks.sort_by_key(|t| (t.created_at(), t.id));
+        let titles: Vec<_> = tasks.iter().map(|t| t.title.clone()).collect();
+        let expected: Vec<_> = (0..20).map(|i| format!("T{i}")).collect();
+        assert_eq!(titles, expected);
     }
 
     #[test]

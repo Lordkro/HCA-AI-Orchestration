@@ -41,6 +41,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/{id}/pause", post(routes::pause))
         .route("/api/projects/{id}/resume", post(routes::resume))
         .route("/api/projects/{id}/cancel", post(routes::cancel))
+        .route("/api/projects/{id}/restart", post(routes::restart))
         .route("/api/projects/{id}/messages", get(routes::messages))
         .route("/api/projects/{id}/artifacts", get(routes::artifacts))
         .route("/api/projects/{id}/feedback", post(routes::feedback))
